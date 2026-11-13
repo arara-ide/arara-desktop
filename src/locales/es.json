@@ -1,6 +1,6 @@
 {
   "desktop.name": "Arara Desktop",
-  "setup.detail": "Antes de continuar, mueve Arara Desktop a Aplicaciones. En Privacidad y seguridad, permite Accesibilidad para Arara Desktop; la captura requiere Grabación de pantalla. No usamos audio. Si el permiso está activo pero falla tras actualizar, elimina la entrada antigua y añade la app de Aplicaciones de nuevo. Comprueba Arara Code si macOS atribuye la solicitud al host. Vuelve a abrir las apps. No se necesita audio ni omitir el selector privado.",
+  "setup.detail": "Accesibilidad puede aparecer como Control del dispositivo y acceso a datos en tu versión de macOS. Antes de continuar, mueve Arara Desktop a Aplicaciones. En Privacidad y seguridad, permite Accesibilidad para Arara Desktop; la captura requiere Grabación de pantalla. No usamos audio. Si el permiso está activo pero falla tras actualizar, elimina la entrada antigua y añade la app de Aplicaciones de nuevo. Comprueba Arara Code si macOS atribuye la solicitud al host. Vuelve a abrir las apps. No se necesita audio ni omitir el selector privado.",
   "setup.continue": "Continuar",
   "setup.cancel": "Cancelar"
 }

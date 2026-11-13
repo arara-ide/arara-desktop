@@ -67,6 +67,8 @@ static int (*invoke_fn)(void *, int, void *);
 static void *(*editable_fn)(void *);
 static int (*set_text_fn)(void *, const char *, void *);
 static void *(*text_fn)(void *);
+static void *(*document_fn)(void *);
+static char *(*document_attribute_fn)(void *, const char *, void *);
 static char *(*get_text_fn)(void *, int, int, void *);
 static void *(*ref_fn)(void *);
 static void *(*state_fn)(void *);
@@ -102,6 +104,10 @@ static void load_atspi(void) {
   LOAD(set_text_fn, "atspi_editable_text_set_text_contents");
   LOAD(text_fn, "atspi_accessible_get_text_iface");
   LOAD(get_text_fn, "atspi_text_get_text");
+  *(void **)(&document_fn) =
+      dlsym(atspi_lib, "atspi_accessible_get_document_iface");
+  *(void **)(&document_attribute_fn) =
+      dlsym(atspi_lib, "atspi_document_get_attribute_value");
   LOAD(state_fn, "atspi_accessible_get_state_set");
   LOAD(contains_fn, "atspi_state_set_contains");
   *(void **)(&unref_fn) = dlsym(gobject_lib, "g_object_unref");
@@ -336,6 +342,50 @@ static void *root_for(int index) {
   }
   unref_fn(desktop);
   return result;
+}
+static void document_metadata(int index) {
+  if (!document_fn || !document_attribute_fn)
+    return;
+  void *root = root_for(index);
+  if (!root)
+    return;
+  void *queue[601];
+  int depths[601];
+  queue[0] = root;
+  depths[0] = 0;
+  int head = 0, tail = 1;
+  while (head < tail && head < 200) {
+    int position = head++;
+    void *element = queue[position];
+    void *document = document_fn(element);
+    if (document) {
+      char *url = document_attribute_fn(document, "DocURL", NULL);
+      char *title = name_fn(element, NULL);
+      printf(",\"documentTitle\":");
+      quoted(title, 160);
+      printf(",\"documentUrl\":");
+      quoted(url, 2000);
+      if (url)
+        free_fn(url);
+      if (title)
+        free_fn(title);
+      unref_fn(document);
+      unref_fn(element);
+      break;
+    }
+    int count = count_fn(element, NULL);
+    if (depths[position] < 12)
+      for (int n = 0; n < count && n < 100 && tail < 600; n++) {
+        void *child = child_fn(element, n, NULL);
+        if (child) {
+          queue[tail] = child;
+          depths[tail++] = depths[position] + 1;
+        }
+      }
+    unref_fn(element);
+  }
+  while (head < tail)
+    unref_fn(queue[head++]);
 }
 static const char *snapshot(int index) {
   clear_nodes();
@@ -747,8 +797,20 @@ static const char *execute(Json request) {
     return "secure";
   if (!display && !strcmp(action, "window_info")) {
     char *title = name_fn(windows[index].accessible, NULL);
+    char process_path[80], application[200] = {0};
+    snprintf(process_path, sizeof(process_path), "/proc/%lu/comm",
+             windows[index].pid);
+    FILE *process_file = fopen(process_path, "r");
+    if (process_file) {
+      if (fgets(application, sizeof(application), process_file))
+        application[strcspn(application, "\r\n")] = 0;
+      fclose(process_file);
+    }
     printf("{\"title\":");
     quoted(title, 160);
+    printf(",\"application\":");
+    quoted(application, 160);
+    document_metadata(index);
     printf("}");
     if (title)
       free_fn(title);
@@ -773,6 +835,7 @@ static const char *execute(Json request) {
     quoted(title, 160);
     printf(",\"application\":");
     quoted(hint.res_class, 160);
+    document_metadata(index);
     printf("}");
     if (title)
       XFree(title);

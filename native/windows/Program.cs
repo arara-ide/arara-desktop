@@ -186,6 +186,36 @@ internal static class Program
         Nodes.Clear(); foreach (var pair in next) Nodes[pair.Key] = pair.Value;
         return new { windowId = id, nodes, truncated = queue.Count > 0 };
     }
+    private static object WindowMetadata(Target target)
+    {
+        var result = new Dictionary<string, object> { ["title"] = target.Element.Current.Name, ["application"] = Process.GetProcessById(target.ProcessId).ProcessName };
+        var queue = new Queue<(AutomationElement Element, int Depth)>();
+        queue.Enqueue((target.Element, 0));
+        var watch = Stopwatch.StartNew();
+        var visited = 0;
+        while (queue.TryDequeue(out var item) && visited++ < 200 && watch.ElapsedMilliseconds < 1000)
+        {
+            try
+            {
+                if (item.Element.Current.IsPassword) continue;
+                if (item.Element.Current.ControlType == ControlType.Document)
+                {
+                    result["documentTitle"] = item.Element.Current.Name;
+                    if (item.Element.TryGetCurrentPattern(ValuePattern.Pattern, out var value))
+                    {
+                        var url = ((ValuePattern)value).Current.Value;
+                        if (Uri.TryCreate(url, UriKind.Absolute, out _)) result["documentUrl"] = url[..Math.Min(url.Length, 2000)];
+                    }
+                    break;
+                }
+                if (item.Depth >= 12) continue;
+                var child = TreeWalker.ControlViewWalker.GetFirstChild(item.Element);
+                for (var count = 0; child != null && count < 100; count++) { queue.Enqueue((child, item.Depth + 1)); child = TreeWalker.ControlViewWalker.GetNextSibling(child); }
+            }
+            catch (ElementNotAvailableException) { }
+        }
+        return result;
+    }
     private static Node TargetNode(JsonElement request)
     {
         var id = String(request, "windowId");
@@ -318,7 +348,7 @@ internal static class Program
             Process.Start(new ProcessStartInfo(application) { UseShellExecute = false }); return new { requested = true };
         }
         var id = String(request, "windowId"); var target = Window(id);
-        if (action == "window_info") return new { title = target.Element.Current.Name, application = Process.GetProcessById(target.ProcessId).ProcessName };
+        if (action == "window_info") return WindowMetadata(target);
         if (action == "focus_window") { if (!SetForegroundWindow(target.Handle)) throw new DesktopFailure("focus"); Nodes.Clear(); return new { focused = true }; }
         if (action == "take_snapshot") return Snapshot(id);
         if (action == "take_screenshot") return Screenshot(id);

@@ -93,6 +93,36 @@ func appAllowed(_ pid: pid_t) -> Bool {
     return !blockedApps.contains(app.bundleIdentifier ?? "")
 }
 
+func accessibleApp(_ pid: pid_t) -> AXUIElement {
+    let root = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(root, 0.25)
+    AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    return root
+}
+
+func windowMetadata(_ ref: WindowRef) -> [String: Any] {
+    var result: [String: Any] = ["title": string(ref.element, kAXTitleAttribute), "application": NSRunningApplication(processIdentifier: ref.pid)?.bundleIdentifier ?? ""]
+    var queue = [(ref.element, 0)]
+    var visited = 0
+    let started = Date()
+    while !queue.isEmpty && visited < 200 && Date().timeIntervalSince(started) < 1 {
+        let (element, depth) = queue.removeFirst()
+        visited += 1
+        if secure(element) { continue }
+        if string(element, kAXRoleAttribute) == "AXWebArea" {
+            result["documentTitle"] = label(element)
+            if let url = attribute(element, kAXURLAttribute) as? URL { result["documentUrl"] = String(url.absoluteString.prefix(2000)) }
+            else if let url = attribute(element, kAXURLAttribute) as? String { result["documentUrl"] = String(url.prefix(2000)) }
+            break
+        }
+        if depth < 12, let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+            queue.append(contentsOf: children.prefix(100).map { ($0, depth + 1) })
+        }
+    }
+    return result
+}
+
 func listWindows(_ application: String?) -> [String: Any] {
     beginInput()
     windows.removeAll()
@@ -100,8 +130,7 @@ func listWindows(_ application: String?) -> [String: Any] {
     elements.removeAll()
     var result: [[String: Any]] = []
     for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && appAllowed(app.processIdentifier) && (application == nil || app.bundleIdentifier == application || String(app.processIdentifier) == application) {
-        let root = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 0.25)
+        let root = accessibleApp(app.processIdentifier)
         guard let children = attribute(root, kAXWindowsAttribute) as? [AXUIElement] else { continue }
         for child in children.prefix(20) {
             let id = UUID().uuidString
@@ -246,6 +275,12 @@ func checkedFrame(_ request: [String: Any]) throws -> (WindowRef, FrameRef) {
     if let focusedElement = attribute(root, kAXFocusedUIElementAttribute), CFGetTypeID(focusedElement) == AXUIElementGetTypeID(), secure(focusedElement as! AXUIElement) { throw DesktopFailure(code: "secure") }
     return (ref, frame)
 }
+func focused(_ ref: WindowRef) -> Bool {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid else { return false }
+    let root = AXUIElementCreateApplication(ref.pid)
+    guard let current = attribute(root, kAXFocusedWindowAttribute) else { return false }
+    return CFEqual(current, ref.element)
+}
 func input(_ request: [String: Any]) throws -> [String: Any] {
     let (ref, frame) = try checkedFrame(request)
     let operation = request["operation"] as? String ?? ""
@@ -301,7 +336,7 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
     var movedY = 0
     while Date() < deadline {
         guard !isCancelled() else { throw DesktopFailure(code: "cancelled") }
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid, try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "focus") }
+        guard focused(ref), try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "focus") }
         if cameraX != 0 || cameraY != 0 {
             let progress = min(1.0, Date().timeIntervalSince(started) / max(0.001, Double(duration) / 1000))
             let nextX = Int(Double(cameraX) * progress)
@@ -331,7 +366,7 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     switch action {
     case "window_info":
         let ref = try window(request["windowId"] as? String ?? "")
-        return ["title": string(ref.element, kAXTitleAttribute), "application": NSRunningApplication(processIdentifier: ref.pid)?.bundleIdentifier ?? ""]
+        return windowMetadata(ref)
     case "take_screenshot": return try screenshot(request)
     case "input": return try input(request)
     case "launch_app":
@@ -360,7 +395,9 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     }
 }
 
-if CommandLine.arguments.contains("--permissions") {
+var inputStat = stat()
+let hasInputPipe = fstat(STDIN_FILENO, &inputStat) == 0 && (inputStat.st_mode & S_IFMT == S_IFIFO || inputStat.st_mode & S_IFMT == S_IFSOCK || inputStat.st_mode & S_IFMT == S_IFREG)
+if CommandLine.arguments.contains("--permissions") || !hasInputPipe && isatty(STDIN_FILENO) == 0 {
     let locale = Locale.preferredLanguages.first ?? "en"
     let title = "Arara Desktop"
     let language = locale.hasPrefix("pt") ? "pt" : locale.hasPrefix("es") ? "es" : "en"
