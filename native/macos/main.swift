@@ -30,6 +30,7 @@ struct FrameRef {
 var frames: [String: FrameRef] = [:]
 let cancellation = NSLock()
 var cancelled = false
+var cancellationGeneration = 0
 var heldKeys: Set<CGKeyCode> = []
 var heldButtons: Set<Int> = []
 
@@ -41,6 +42,7 @@ func isCancelled() -> Bool {
 func cancelInput() {
     cancellation.lock()
     cancelled = true
+    cancellationGeneration += 1
     cancellation.unlock()
 }
 func beginInput() {
@@ -92,6 +94,7 @@ func appAllowed(_ pid: pid_t) -> Bool {
 }
 
 func listWindows(_ application: String?) -> [String: Any] {
+    beginInput()
     windows.removeAll()
     frames.removeAll()
     elements.removeAll()
@@ -248,7 +251,7 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
     let operation = request["operation"] as? String ?? ""
     let duration = request["durationMs"] as? Int ?? 0
     guard duration >= 0 && duration <= 5000 else { throw DesktopFailure(code: "unsupported") }
-    beginInput()
+    guard !isCancelled() else { throw DesktopFailure(code: "cancelled") }
     defer { releaseInput(); frames.removeAll(); elements.removeAll() }
     if operation == "move" || operation == "click" {
         guard let x = request["x"] as? Double, let y = request["y"] as? Double, x.isFinite, y.isFinite, x >= 0, y >= 0, x < frame.bounds.width, y < frame.bounds.height else { throw DesktopFailure(code: "unsupported") }
@@ -396,11 +399,18 @@ DispatchQueue.global(qos: .userInitiated).async {
 while let line = readLine() {
     guard let data = line.data(using: .utf8), let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
     if request["action"] as? String == "stop" { cancelInput() }
+    cancellation.lock()
+    let generation = cancellationGeneration
+    cancellation.unlock()
     requests.addOperation {
       autoreleasepool {
         var reply: [String: Any]
         do {
             guard line.utf8.count <= 64000, let data = line.data(using: .utf8), let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw DesktopFailure(code: "unsupported") }
+            cancellation.lock()
+            let currentGeneration = cancellationGeneration
+            cancellation.unlock()
+            if currentGeneration != generation && !["status", "stop"].contains(request["action"] as? String ?? "") { throw DesktopFailure(code: "cancelled") }
             reply = ["version": 1, "result": try execute(request)]
         } catch let error as DesktopFailure {
             reply = ["version": 1, "error": error.code]

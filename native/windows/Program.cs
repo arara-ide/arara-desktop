@@ -19,7 +19,9 @@ internal static class Program
     private static readonly Dictionary<string, Frame> Frames = [];
     private static readonly HashSet<ushort> Keys = [];
     private static readonly HashSet<string> Buttons = [];
-    private static readonly BlockingCollection<string> Requests = new(16);
+    private static readonly BlockingCollection<(string Line, int Generation)> Requests = new(16);
+    private static int Generation;
+    private static int ActiveGeneration;
     private static CancellationTokenSource Cancellation = new();
     private static readonly object CancellationLock = new();
     private static JsonSerializerOptions JsonOptions => new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -43,7 +45,7 @@ internal static class Program
                 if (String(parsed.RootElement, "action") == "stop") Cancel();
             }
             catch (JsonException) { Reply(null, "invalid_request"); continue; }
-            Requests.Add(line);
+            Requests.Add((line, Volatile.Read(ref Generation)));
         }
         Cancel();
         Requests.CompleteAdding();
@@ -54,11 +56,13 @@ internal static class Program
     {
         try
         {
-            foreach (var line in Requests.GetConsumingEnumerable())
+            foreach (var queued in Requests.GetConsumingEnumerable())
             {
                 try
                 {
-                    using var parsed = JsonDocument.Parse(line);
+                    using var parsed = JsonDocument.Parse(queued.Line);
+                    ActiveGeneration = queued.Generation;
+                    if (ActiveGeneration != Volatile.Read(ref Generation) && String(parsed.RootElement, "action") is not ("status" or "stop")) throw new DesktopFailure("cancelled");
                     Reply(Execute(parsed.RootElement), null);
                 }
                 catch (DesktopFailure error) { Reply(null, error.Message); }
@@ -75,7 +79,7 @@ internal static class Program
     }
     private static string String(JsonElement request, string key) => request.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
     private static int Number(JsonElement request, string key, int fallback = 0) => request.TryGetProperty(key, out var value) && value.TryGetInt32(out var number) ? number : fallback;
-    private static void Cancel() { lock (CancellationLock) Cancellation.Cancel(); }
+    private static void Cancel() { Interlocked.Increment(ref Generation); lock (CancellationLock) Cancellation.Cancel(); }
     private static Target Window(string id)
     {
         if (!Windows.TryGetValue(id, out var target) || !IsWindow(target.Handle)) throw new DesktopFailure("stale");
@@ -285,7 +289,7 @@ internal static class Program
             var movedX = 0; var movedY = 0;
             while (watch.ElapsedMilliseconds < duration)
             {
-                if (Cancellation.IsCancellationRequested) throw new DesktopFailure("cancelled");
+                if (Cancellation.IsCancellationRequested || ActiveGeneration != Volatile.Read(ref Generation)) throw new DesktopFailure("cancelled");
                 FocusCheck(target); if (Bounds(target) != frame.Bounds) throw new DesktopFailure("stale");
                 if (cameraX != 0 || cameraY != 0)
                 {

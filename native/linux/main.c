@@ -33,6 +33,9 @@ static NodeRef nodes[100];
 static int node_count;
 static unsigned long sequence;
 static volatile sig_atomic_t cancelled;
+static volatile sig_atomic_t generation;
+static sig_atomic_t queued_generation;
+static sig_atomic_t active_generation;
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static char line_queue[64001];
 static int queued;
@@ -663,7 +666,7 @@ static const char *input(Json request, int index) {
   }
   for (int elapsed = 0; elapsed < duration && !error; elapsed += 10) {
     Rectangle current;
-    if (cancelled)
+    if (cancelled || generation != active_generation)
       error = "cancelled";
     else if (!active(windows[index].handle) ||
              !bounds(windows[index].handle, &current) ||
@@ -893,16 +896,19 @@ static void *reader(void *unused) {
     text(member(request, "action"), action, sizeof(action));
     if (!strcmp(action, "stop"))
       cancelled = 1;
+    generation++;
     pthread_mutex_lock(&state_lock);
     while (queued)
       pthread_cond_wait(&available, &state_lock);
     snprintf(line_queue, sizeof(line_queue), "%s", line);
+    queued_generation = generation;
     queued = 1;
     pthread_cond_broadcast(&available);
     pthread_mutex_unlock(&state_lock);
   }
   free(line);
   cancelled = 1;
+  generation++;
   pthread_mutex_lock(&state_lock);
   closed_input = 1;
   pthread_cond_broadcast(&available);
@@ -912,6 +918,7 @@ static void *reader(void *unused) {
 static void terminate(int sig) {
   (void)sig;
   cancelled = 1;
+  generation++;
 }
 static int xerror(Display *connection, XErrorEvent *event) {
   (void)connection;
@@ -937,6 +944,7 @@ int main(void) {
       break;
     }
     memcpy(line, line_queue, sizeof(line));
+    active_generation = queued_generation;
     queued = 0;
     pthread_cond_broadcast(&available);
     pthread_mutex_unlock(&state_lock);
@@ -948,7 +956,13 @@ int main(void) {
     if (!capture)
       break;
     stdout = capture;
-    const char *error = execute(request);
+    char requested_action[30];
+    text(member(request, "action"), requested_action, sizeof(requested_action));
+    const char *error = generation != active_generation &&
+                                strcmp(requested_action, "status") &&
+                                strcmp(requested_action, "stop")
+                            ? "cancelled"
+                            : execute(request);
     fflush(capture);
     stdout = saved;
     fclose(capture);
