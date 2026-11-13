@@ -285,6 +285,9 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { throw DesktopFailure(code: "failed") }
         values.withUnsafeBufferPointer { buffer in event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress) }
         event.post(tap: .cghidEventTap)
+        guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { throw DesktopFailure(code: "failed") }
+        values.withUnsafeBufferPointer { buffer in up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress) }
+        up.post(tap: .cghidEventTap)
     } else { throw DesktopFailure(code: "unsupported") }
     let deadline = Date().addingTimeInterval(Double(duration) / 1000)
     while Date() < deadline {

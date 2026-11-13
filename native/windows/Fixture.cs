@@ -6,6 +6,7 @@ internal static class Fixture
     private static void Record(string kind) { Console.WriteLine($"{kind}:{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0:R}"); Console.Out.Flush(); }
     public static void Run()
     {
+        if (FixtureToken.LaunchStandard()) return;
         using var form = new Form { Text = "Arara Desktop Fixture", ClientSize = new Size(420, 420), StartPosition = FormStartPosition.Manual, Location = new Point(80, 80), KeyPreview = true };
         var text = new TextBox { AccessibleName = "Fixture input", Text = "Initial", Location = new Point(20, 25), Width = 350 };
         var button = new Button { AccessibleName = "Apply fixture", Text = "Apply fixture", Location = new Point(20, 70), Width = 180 };
