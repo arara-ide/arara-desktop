@@ -68,9 +68,7 @@ static void load_atspi(void) {
     gobject_lib = dlopen("libgobject-2.0.so.0", RTLD_NOW);
     glib_lib = dlopen("libglib-2.0.so.0", RTLD_NOW);
     if (!atspi_lib || !gobject_lib || !glib_lib) return;
-#define LOAD(variable, symbol) do { *(void **)(&(variable)) = dlsym(atspi_lib, symbol);
- if (!(variable)) return;
- } while (0)
+#define LOAD(variable, symbol) do { *(void **)(&(variable)) = dlsym(atspi_lib, symbol); if (!(variable)) return; } while (0)
     LOAD(atspi_init_fn, "atspi_init");
  LOAD(desktop_fn, "atspi_get_desktop");
     LOAD(count_fn, "atspi_accessible_get_child_count");

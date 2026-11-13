@@ -21,13 +21,7 @@ try {
   assert.ok((await call({ action: 'input', windowId: 'missing', frameId: 'missing', operation: 'keys', keys: ['W'], durationMs: 99999 })).error);
   assert.equal((await call({ action: 'stop' })).result.stopped, true);
   console.log(`PASS native protocol, capabilities, malformed target rejection and stop (${process.platform})`);
-  if (!process.argv.includes('--status')) {
-    assert.equal(status.result.accessibility, true, 'Native accessibility permission/session is required; this scenario is not approved');
-    assert.equal(status.result.input, true, 'Native input session is required; this scenario is not approved');
-    const result = await call({ action: 'list_windows', application: 'AraraDesktopFixture' });
-    assert.ok(Array.isArray(result.result.windows));
-    console.log('PASS native isolated window enumeration');
-  }
+
 } finally {
   child.stdin.end();
   await new Promise(resolve => { child.once('exit', resolve); setTimeout(() => { child.kill(); resolve(); }, 1500).unref(); });

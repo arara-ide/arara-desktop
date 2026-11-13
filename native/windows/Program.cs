@@ -1,3 +1,4 @@
+using System.IO;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -26,6 +27,7 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        if (Environment.GetCommandLineArgs().Contains("--fixture")) { Fixture.Run(); return; }
         SetProcessDpiAwarenessContext(new IntPtr(-4));
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; Cancel(); };
         var worker = new Thread(Work) { IsBackground = false };
