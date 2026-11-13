@@ -184,13 +184,6 @@ func act(_ request: [String: Any]) throws -> [String: Any] {
     return ["performed": operation, "verified": false]
 }
 
-func isTrusted(prompt: Bool = false) -> Bool {
-    if prompt {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
-    }
-    return AXIsProcessTrusted()
-}
 
 func bounds(_ ref: WindowRef) throws -> CGRect {
     guard let position = attribute(ref.element, kAXPositionAttribute), let size = attribute(ref.element, kAXSizeAttribute) else { throw DesktopFailure(code: "stale") }
@@ -246,8 +239,8 @@ func checkedFrame(_ request: [String: Any]) throws -> (WindowRef, FrameRef) {
     guard let frame = frames[request["frameId"] as? String ?? ""], frame.window == request["windowId"] as? String, Date().timeIntervalSince(frame.created) < 15, try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "stale") }
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid else { throw DesktopFailure(code: "focus") }
     let root = AXUIElementCreateApplication(ref.pid)
-    guard let focused = attribute(root, kAXFocusedWindowAttribute), CFEqual(focused, ref.element), let focusedElement = attribute(root, kAXFocusedUIElementAttribute) else { throw DesktopFailure(code: "focus") }
-    if CFGetTypeID(focusedElement) == AXUIElementGetTypeID(), secure(focusedElement as! AXUIElement) { throw DesktopFailure(code: "secure") }
+    guard let focused = attribute(root, kAXFocusedWindowAttribute), CFEqual(focused, ref.element) else { throw DesktopFailure(code: "focus") }
+    if let focusedElement = attribute(root, kAXFocusedUIElementAttribute), CFGetTypeID(focusedElement) == AXUIElementGetTypeID(), secure(focusedElement as! AXUIElement) { throw DesktopFailure(code: "secure") }
     return (ref, frame)
 }
 func input(_ request: [String: Any]) throws -> [String: Any] {
@@ -311,6 +304,9 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     if action == "stop" { releaseInput(); frames.removeAll(); return ["stopped": true] }
     guard AXIsProcessTrusted() else { throw DesktopFailure(code: "permission") }
     switch action {
+    case "window_info":
+        let ref = try window(request["windowId"] as? String ?? "")
+        return ["title": string(ref.element, kAXTitleAttribute), "application": NSRunningApplication(processIdentifier: ref.pid)?.bundleIdentifier ?? ""]
     case "take_screenshot": return try screenshot(request)
     case "input": return try input(request)
     case "launch_app":
@@ -342,12 +338,16 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
 if CommandLine.arguments.contains("--permissions") {
     let locale = Locale.preferredLanguages.first ?? "en"
     let title = "Arara Desktop"
-    let message = locale.hasPrefix("pt") ? "Antes de continuar, mova Arara Desktop para Aplicativos. Em Privacidade e Segurança, permita Acessibilidade para Arara Desktop; captura de janela exige Gravação da Tela. Não usamos áudio. Se a permissão estiver ativa e continuar falhando após atualização, remova a entrada antiga de Arara Desktop e adicione o app de Aplicativos novamente. Confira também Arara Code quando o macOS atribuir a solicitação ao host. Reabra os apps depois. Permissões de áudio ou de ignorar o seletor privado não são necessárias para este helper." : locale.hasPrefix("es") ? "Antes de continuar, mueve Arara Desktop a Aplicaciones. En Privacidad y seguridad, permite Accesibilidad para Arara Desktop; la captura requiere Grabación de pantalla. No usamos audio. Si el permiso está activo pero falla tras actualizar, elimina la entrada antigua y añade la app de Aplicaciones de nuevo. Comprueba Arara Code si macOS atribuye la solicitud al host. Vuelve a abrir las apps. No se necesita audio ni omitir el selector privado." : "Before continuing, move Arara Desktop to Applications. In Privacy & Security, allow Accessibility for Arara Desktop; window capture requires Screen Recording. Audio is not used. If access is enabled but fails after an update, remove the old Arara Desktop entry and add the app from Applications again. Also check Arara Code when macOS attributes the request to the host. Reopen the apps afterwards. Audio and bypassing the private window picker are not required by this helper."
+    let language = locale.hasPrefix("pt") ? "pt" : locale.hasPrefix("es") ? "es" : "en"
+    let resources = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/locales")
+    let data = try! Data(contentsOf: resources.appendingPathComponent("\(language).json"))
+    let catalog = try! JSONSerialization.jsonObject(with: data) as! [String: String]
+    let message = catalog["setup.detail"]!
     let alert = NSAlert()
     alert.messageText = title
     alert.informativeText = message
-    alert.addButton(withTitle: locale.hasPrefix("pt") ? "Continuar" : locale.hasPrefix("es") ? "Continuar" : "Continue")
-    alert.addButton(withTitle: locale.hasPrefix("pt") ? "Cancelar" : locale.hasPrefix("es") ? "Cancelar" : "Cancel")
+    alert.addButton(withTitle: catalog["setup.continue"]!)
+    alert.addButton(withTitle: catalog["setup.cancel"]!)
     NSApplication.shared.activate(ignoringOtherApps: true)
     if alert.runModal() == .alertFirstButtonReturn {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: Bundle.main.bundlePath)])

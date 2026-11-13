@@ -287,6 +287,7 @@ internal static class Program
             Process.Start(new ProcessStartInfo(application) { UseShellExecute = false }); return new { requested = true };
         }
         var id = String(request, "windowId"); var target = Window(id);
+        if (action == "window_info") return new { title = target.Element.Current.Name, application = Process.GetProcessById(target.ProcessId).ProcessName };
         if (action == "focus_window") { if (!SetForegroundWindow(target.Handle)) throw new DesktopFailure("focus"); Nodes.Clear(); return new { focused = true }; }
         if (action == "take_snapshot") return Snapshot(id);
         if (action == "take_screenshot") return Screenshot(id);

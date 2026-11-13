@@ -1,5 +1,5 @@
 export const VERSION = 1;
-export const ACTIONS = ['status', 'list_windows', 'focus_window', 'take_snapshot', 'read', 'act', 'take_screenshot', 'input', 'launch_app', 'stop'] as const;
+export const ACTIONS = ['status', 'window_info', 'list_windows', 'focus_window', 'take_snapshot', 'read', 'act', 'take_screenshot', 'input', 'launch_app', 'stop'] as const;
 export type NativeAction = typeof ACTIONS[number];
 export interface NativeRequest {
   version: 1; action: NativeAction; application?: string; windowId?: string; uid?: string;
