@@ -27,7 +27,7 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
-        if (Environment.GetCommandLineArgs().Contains("--fixture")) { Fixture.Run(); return; }
+        if (Environment.GetCommandLineArgs().Contains("--fixture") || Environment.GetCommandLineArgs().Contains("--fixture-standard")) { Fixture.Run(); return; }
         SetProcessDpiAwarenessContext(new IntPtr(-4));
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; Cancel(); };
         var worker = new Thread(Work) { IsBackground = false };
@@ -96,9 +96,18 @@ internal static class Program
                 if (!OpenProcessToken(process, 8, out var token)) return false;
                 try
                 {
-                    var elevation = 0;
-                    if (!GetTokenInformation(token, 20, ref elevation, 4, out _)) return false;
-                    return elevation == 0 && IsWindowVisible(handle);
+                    GetTokenInformationBuffer(token, 25, IntPtr.Zero, 0, out var needed);
+                    if (needed <= 0 || needed > 4096) return false;
+                    var buffer = Marshal.AllocHGlobal(needed);
+                    try
+                    {
+                        if (!GetTokenInformationBuffer(token, 25, buffer, needed, out _)) return false;
+                        var sid = Marshal.ReadIntPtr(buffer);
+                        var count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+                        var integrity = Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+                        return integrity < 0x3000 && IsWindowVisible(handle);
+                    }
+                    finally { Marshal.FreeHGlobal(buffer); }
                 }
                 finally { CloseHandle(token); }
             }
@@ -333,5 +342,8 @@ internal static class Program
     [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint process);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
     [DllImport("advapi32.dll")] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation")] private static extern bool GetTokenInformationBuffer(IntPtr token, int information, IntPtr value, int size, out int needed);
+    [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+    [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
     [DllImport("advapi32.dll")] private static extern bool GetTokenInformation(IntPtr token, int information, ref int value, int size, out int needed);
 }

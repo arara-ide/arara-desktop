@@ -26,7 +26,7 @@ internal static class FixtureToken
                 }
                 finally { LocalFree(sid); }
                 var startup = new STARTUPINFO { Size = Marshal.SizeOf<STARTUPINFO>(), Flags = 0x100, StdInput = GetStdHandle(-10), StdOutput = GetStdHandle(-11), StdError = GetStdHandle(-12), Desktop = "winsta0\\default" };
-                var command = new System.Text.StringBuilder($"\"{Environment.ProcessPath}\" --fixture");
+                var command = new System.Text.StringBuilder($"\"{Environment.ProcessPath}\" --fixture-standard");
                 if (!CreateProcessAsUser(token, null, command, IntPtr.Zero, IntPtr.Zero, true, 0, IntPtr.Zero, null, ref startup, out var process)) throw new InvalidOperationException($"Fixture launch failed: {Marshal.GetLastWin32Error()}");
                 CloseHandle(process.Thread);
                 try { WaitForSingleObject(process.Process, 60000); }

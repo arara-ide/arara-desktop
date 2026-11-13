@@ -27,6 +27,7 @@ final class Fixture: NSObject, NSApplicationDelegate {
         password.setAccessibilityLabel("Fixture protected")
         window.contentView!.addSubview(Canvas(frame: NSRect(x: 0, y: 0, width: 420, height: 220)))
         for view in [field, button, state, password] { window.contentView!.addSubview(view) }
+        record("fixture_ready")
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

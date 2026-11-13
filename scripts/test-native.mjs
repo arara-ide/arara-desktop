@@ -1,7 +1,9 @@
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
+process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const binary = process.platform === 'darwin' ? resolve('dist/Arara Desktop.app/Contents/MacOS/arara-desktop') : resolve(`dist/arara-desktop${process.platform === 'win32' ? '.exe' : ''}`);
 const child = spawn(binary, [], { stdio: ['pipe', 'pipe', 'inherit'] });
 const lines = createInterface({ input: child.stdout });

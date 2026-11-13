@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="a" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#064e3b"/>
+      <stop offset=".42" stop-color="#16a34a"/>
+      <stop offset=".72" stop-color="#4ade80"/>
+      <stop offset="1" stop-color="#dcfce7"/>
+    </linearGradient>
+
+    <linearGradient id="b" x1="0" y1="1" x2="1" y2="0">
+      <stop stop-color="#052e16"/>
+      <stop offset=".55" stop-color="#16a34a"/>
+      <stop offset="1" stop-color="#4ade80"/>
+    </linearGradient>
+
+    <linearGradient id="c" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#a3e635"/>
+      <stop offset=".5" stop-color="#4ade80"/>
+      <stop offset="1" stop-color="#16a34a"/>
+    </linearGradient>
+
+    <mask
+      id="body-cutout"
+      maskUnits="userSpaceOnUse"
+      x="0"
+      y="0"
+      width="5120"
+      height="5120"
+    >
+      <rect width="5120" height="5120" fill="#fff"/>
+      <ellipse cx="2570" cy="3870" rx="145" ry="160" fill="#000"/>
+    </mask>
+  </defs>
+
+  <g
+    transform="translate(0 512) scale(.1 -.1)"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path
+      mask="url(#body-cutout)"
+      fill="url(#a)"
+      stroke="url(#a)"
+      stroke-width="18"
+      d="M3025 5113C1752 4999 863 4259 607 3100c-40-180-74-416-112-785-19-187-42-396-50-465-69-566-181-1015-371-1489C33 260 0 164 0 148 0 97 37 41 83 19 124 1 176 0 1864 0h1738l39 22c26 14 46 37 60 66 21 42 21 53 16 285-3 133-13 290-21 349-55 385-160 693-314 924-104 154-117 165-267 213-170 53-252 95-277 141-18 32-19 49-14 180 20 521 199 1048 485 1430 80 107 240 271 352 360 168 134 339 231 584 330 72 29 131 53 132 54 6 5-29 109-58 172-173 386-579 600-1127 592-70-1-145-3-167-5Z"
+    />
+
+    <path
+      fill="url(#b)"
+      stroke="url(#b)"
+      stroke-width="16"
+      d="M4380 4031c-191-78-297-131-415-210-188-126-347-286-477-480-57-86-148-248-148-265 0-3 26-10 58-16 358-74 673-307 918-680 118-181 221-396 304-635 45-133 70-168 131-183 56-14 108 0 145 40 51 56 146 340 183 547 103 571-3 1155-299 1641-55 91-217 310-228 309-4 0-81-31-172-68Z"
+    />
+
+    <path
+      fill="url(#c)"
+      stroke="url(#c)"
+      stroke-width="14"
+      d="M3220 2756c-35-108-78-342-95-517l-6-66 53-20c29-11 94-31 143-43 87-23 92-26 152-88 34-35 92-107 129-159l68-96 110 6c173 8 466 79 466 113 0 25-117 242-184 343-133 197-287 346-454 438-89 50-163 76-284 101l-87 19-11-31Z"
+    />
+  </g>
+</svg>

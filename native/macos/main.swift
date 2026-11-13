@@ -96,14 +96,14 @@ func listWindows(_ application: String?) -> [String: Any] {
     frames.removeAll()
     elements.removeAll()
     var result: [[String: Any]] = []
-    for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && appAllowed(app.processIdentifier) && (application == nil || app.bundleIdentifier == application) {
+    for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && appAllowed(app.processIdentifier) && (application == nil || app.bundleIdentifier == application || String(app.processIdentifier) == application) {
         let root = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(root, 0.25)
         guard let children = attribute(root, kAXWindowsAttribute) as? [AXUIElement] else { continue }
         for child in children.prefix(20) {
             let id = UUID().uuidString
             windows[id] = WindowRef(pid: app.processIdentifier, element: child)
-            result.append(["windowId": id, "app": app.localizedName ?? "", "title": String(string(child, kAXTitleAttribute).prefix(160)), "active": NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier])
+            result.append(["windowId": id, "processId": app.processIdentifier, "app": app.localizedName ?? "", "title": String(string(child, kAXTitleAttribute).prefix(160)), "active": NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier])
             if result.count >= 100 { return ["windows": result, "truncated": true] }
         }
     }
@@ -371,6 +371,9 @@ interrupt.resume()
 let requests = OperationQueue()
 requests.maxConcurrentOperationCount = 1
 
+_ = NSApplication.shared
+_ = NSWorkspace.shared
+DispatchQueue.global(qos: .userInitiated).async {
 while let line = readLine() {
     guard let data = line.data(using: .utf8), let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
     if request["action"] as? String == "stop" { cancelInput() }
@@ -392,3 +395,6 @@ while let line = readLine() {
 cancelInput()
 requests.waitUntilAllOperationsAreFinished()
 releaseInput()
+DispatchQueue.main.async { exit(0) }
+}
+RunLoop.main.run()
