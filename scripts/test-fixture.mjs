@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const root = resolve('.');
+const accessible = process.argv.includes('--accessible');
 const scratch = mkdtempSync(join(tmpdir(), 'arara-desktop-fixture-'));
 const binary = process.platform === 'darwin' ? resolve('dist/Arara Desktop.app/Contents/MacOS/arara-desktop') : resolve(`dist/arara-desktop${process.platform === 'win32' ? '.exe' : ''}`);
 const run = (command, args) => { const result = spawnSync(command, args, { encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr); };
@@ -20,7 +21,11 @@ if (process.platform === 'darwin') {
   run('xcrun', ['swiftc', 'native/macos/fixture.swift', '-o', fixtureBinary]);
   run('codesign', ['--force', '--sign', '-', app]);
 } else if (process.platform === 'win32') { fixtureBinary = binary; fixtureArgs = ['--fixture']; }
-else { fixtureBinary = join(scratch, 'fixture'); run('cc', ['native/linux/fixture.c', '-lX11', '-o', fixtureBinary]); }
+else {
+  fixtureBinary = join(scratch, 'fixture');
+  const flags = accessible ? spawnSync('pkg-config', ['--cflags', '--libs', 'gtk+-3.0'], { encoding: 'utf8' }).stdout.trim().split(/\s+/) : ['-lX11'];
+  run('cc', [accessible ? 'native/linux/accessible-fixture.c' : 'native/linux/fixture.c', ...flags, '-o', fixtureBinary]);
+}
 const manager = process.platform === 'linux' ? spawn('openbox', [], { stdio: 'ignore' }) : undefined;
 const eventFile = join(scratch, 'events.log');
 const fixtureApp = process.platform === 'darwin' ? resolve(fixtureBinary, '../../..') : undefined;
@@ -54,7 +59,9 @@ try {
   ok(await call({ action: 'focus_window', windowId })); await sleep(300);
   const snapshot = ok(await call({ action: 'take_snapshot', windowId }));
   assert.ok(!JSON.stringify(snapshot).includes('fixture-secret'));
-  if (process.platform !== 'linux') {
+  if (process.platform !== 'linux' || accessible) {
+    const repeated = ok(await call({ action: 'take_snapshot', windowId }));
+    assert.deepEqual(repeated.nodes.map(node => node.uid), snapshot.nodes.map(node => node.uid), 'Unchanged controls must keep stable identifiers for compact diffs');
     const input = snapshot.nodes.find(node => node.name === 'Fixture input'); assert.ok(input);
     ok(await call({ action: 'act', windowId, uid: input.uid, operation: 'set_value', value: 'Isolated test' }));
     assert.ok((await call({ action: 'act', windowId, uid: input.uid, operation: 'set_value', value: 'stale' })).error);

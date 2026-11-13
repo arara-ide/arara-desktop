@@ -52,6 +52,7 @@ static void *atspi_lib;
 static void *gobject_lib;
 static void *glib_lib;
 static int (*atspi_init_fn)(void);
+static void (*atspi_timeout_fn)(int, int);
 static void *(*desktop_fn)(int);
 static int (*count_fn)(void *, void *);
 static void *(*child_fn)(void *, int, void *);
@@ -88,6 +89,7 @@ static void load_atspi(void) {
       return;                                                                  \
   } while (0)
   LOAD(atspi_init_fn, "atspi_init");
+  *(void **)(&atspi_timeout_fn) = dlsym(atspi_lib, "atspi_set_timeout");
   LOAD(desktop_fn, "atspi_get_desktop");
   LOAD(count_fn, "atspi_accessible_get_child_count");
   LOAD(child_fn, "atspi_accessible_get_child_at_index");
@@ -116,6 +118,13 @@ static void load_atspi(void) {
 #undef LOAD
   if (!ref_fn || !unref_fn || !free_fn || atspi_init_fn() != 0)
     desktop_fn = NULL;
+  else if (atspi_timeout_fn)
+    atspi_timeout_fn(250, 500);
+}
+static double monotonic_time(void) {
+  struct timespec value;
+  clock_gettime(CLOCK_MONOTONIC, &value);
+  return value.tv_sec + value.tv_nsec / 1000000000.0;
 }
 static void clear_nodes(void) {
   if (unref_fn)
@@ -354,7 +363,8 @@ static void document_metadata(int index) {
   queue[0] = root;
   depths[0] = 0;
   int head = 0, tail = 1;
-  while (head < tail && head < 200) {
+  double started = monotonic_time();
+  while (head < tail && head < 200 && monotonic_time() - started < 1) {
     int position = head++;
     void *element = queue[position];
     void *document = document_fn(element);
@@ -388,12 +398,16 @@ static void document_metadata(int index) {
     unref_fn(queue[head++]);
 }
 static const char *snapshot(int index) {
-  clear_nodes();
   void *root = root_for(index);
   if (!root) {
+    clear_nodes();
     printf("{\"nodes\":[],\"truncated\":false,\"accessibility\":false}");
     return NULL;
   }
+  NodeRef previous[100];
+  int previous_count = node_count;
+  memcpy(previous, nodes, sizeof(previous));
+  node_count = 0;
   void *queue[601];
   int depth[601];
   int head = 0, tail = 1;
@@ -401,7 +415,9 @@ static const char *snapshot(int index) {
   depth[0] = 0;
   printf("{\"nodes\":[");
   int comma = 0;
-  while (head < tail && node_count < 100 && !cancelled) {
+  double started = monotonic_time();
+  while (head < tail && node_count < 100 && !cancelled &&
+         monotonic_time() - started < 3) {
     int position = head++;
     void *element = queue[position];
     char *role = role_fn(element, NULL);
@@ -416,7 +432,16 @@ static const char *snapshot(int index) {
     NodeRef *node = &nodes[node_count++];
     node->element = element;
     node->window = index;
-    snprintf(node->uid, sizeof(node->uid), "n%lu", ++sequence);
+    int existing = -1;
+    for (int n = 0; n < previous_count; n++)
+      if (previous[n].window == index && previous[n].element == element) {
+        existing = n;
+        break;
+      }
+    if (existing >= 0)
+      snprintf(node->uid, sizeof(node->uid), "%s", previous[existing].uid);
+    else
+      snprintf(node->uid, sizeof(node->uid), "n%lu", ++sequence);
     snprintf(node->name, sizeof(node->name), "%s", name ? name : "");
     void *action = action_fn(element);
     void *editable = editable_fn(element);
@@ -465,6 +490,8 @@ static const char *snapshot(int index) {
   int truncated = head < tail;
   while (head < tail)
     unref_fn(queue[head++]);
+  for (int n = 0; n < previous_count; n++)
+    unref_fn(previous[n].element);
   printf("],\"truncated\":%s}", truncated ? "true" : "false");
   return NULL;
 }
