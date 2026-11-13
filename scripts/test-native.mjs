@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
+const { version: appVersion } = JSON.parse(readFileSync('package.json', 'utf8'));
 const binary = process.platform === 'darwin' ? resolve('dist/Arara Desktop.app/Contents/MacOS/arara-desktop') : resolve(`dist/arara-desktop${process.platform === 'win32' ? '.exe' : ''}`);
 const child = spawn(binary, [], { stdio: ['pipe', 'pipe', 'inherit'] });
 const lines = createInterface({ input: child.stdout });
@@ -16,6 +18,7 @@ const call = request => new Promise((resolve, reject) => {
 });
 try {
   const status = await call({ action: 'status' });
+  assert.equal(status.result.appVersion, appVersion);
   assert.equal(status.result.platform, process.platform);
   assert.equal(status.result.audio, false);
   assert.equal(typeof status.result.accessibility, 'boolean');

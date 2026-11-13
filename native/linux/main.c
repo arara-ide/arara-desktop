@@ -777,9 +777,9 @@ static const char *execute(Json request) {
   if (number(request, "version", 0) != 1)
     return "unsupported";
   if (!strcmp(action, "status")) {
-    printf("{\"platform\":\"linux\",\"accessibility\":%s,\"input\":%s,"
+    printf("{\"appVersion\":\"%s\",\"platform\":\"linux\",\"accessibility\":%s,\"input\":%s,"
            "\"screenshots\":%s,\"audio\":false,\"session\":\"%s\"}",
-           desktop_fn ? "true" : "false", display ? "true" : "false",
+           ARARA_APP_VERSION, desktop_fn ? "true" : "false", display ? "true" : "false",
            display ? "true" : "false",
            getenv("WAYLAND_DISPLAY") ? "wayland" : "x11");
     return NULL;
