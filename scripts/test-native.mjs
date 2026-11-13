@@ -22,6 +22,11 @@ try {
   assert.equal(status.result.platform, process.platform);
   assert.equal(status.result.audio, false);
   assert.equal(typeof status.result.accessibility, 'boolean');
+  if (status.result.sessionLocked === true) {
+    assert.equal(status.result.input, false);
+    assert.equal((await call({ action: 'focus_window', windowId: 'missing' })).error, 'session_locked');
+    assert.equal((await call({ action: 'input', windowId: 'missing', frameId: 'missing', operation: 'click', x: 1, y: 1 })).error, 'session_locked');
+  }
   assert.ok((await call({ action: 'unknown' })).error);
   assert.ok((await call({ action: 'input', windowId: 'missing', frameId: 'missing', operation: 'keys', keys: ['W'], durationMs: 99999 })).error);
   assert.equal((await call({ action: 'stop' })).result.stopped, true);

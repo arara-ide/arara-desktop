@@ -14,13 +14,14 @@ export function validateRequest(value: unknown): NativeRequest {
   for (const key of ['application', 'windowId', 'uid', 'frameId', 'operation', 'value', 'button']) if (input[key] !== undefined && (typeof input[key] !== 'string' || (input[key] as string).length > (key === 'value' ? 8000 : 200))) throw new Error('invalid_request');
   for (const key of ['x', 'y', 'dx', 'dy', 'durationMs', 'limit', 'offset']) if (input[key] !== undefined && (typeof input[key] !== 'number' || !Number.isFinite(input[key]))) throw new Error('invalid_request');
   if (input.action === 'input') {
-    if (!input.windowId || !input.frameId || !['move', 'relative_move', 'click', 'keys', 'text'].includes(String(input.operation))) throw new Error('invalid_request');
+    if (!input.windowId || !input.frameId || !['move', 'relative_move', 'click', 'keys', 'text', 'scroll'].includes(String(input.operation))) throw new Error('invalid_request');
     if (input.durationMs !== undefined && (!Number.isInteger(input.durationMs) || Number(input.durationMs) < 0 || Number(input.durationMs) > 5000)) throw new Error('invalid_request');
     if (['move', 'click'].includes(String(input.operation)) && (typeof input.x !== 'number' || typeof input.y !== 'number' || input.x < 0 || input.y < 0)) throw new Error('invalid_request');
     if (Number.isFinite(input.dx) && Math.abs(Number(input.dx)) > 2000 || Number.isFinite(input.dy) && Math.abs(Number(input.dy)) > 2000) throw new Error('invalid_request');
     if (input.operation === 'relative_move' && (typeof input.dx !== 'number' || typeof input.dy !== 'number' || Math.abs(input.dx) > 2000 || Math.abs(input.dy) > 2000)) throw new Error('invalid_request');
     if (input.operation === 'keys' && (!Array.isArray(input.keys) || !input.keys.length || input.keys.length > 6 || input.keys.some(key => typeof key !== 'string' || !/^(?:[A-Z0-9]|ENTER|TAB|SPACE|BACKSPACE|ESCAPE|META|SHIFT|ALT|CTRL|LEFT|RIGHT|DOWN|UP)$/i.test(key)))) throw new Error('invalid_request');
     if (input.operation === 'text' && typeof input.value !== 'string') throw new Error('invalid_request');
+    if (input.operation === 'scroll' && (!Number.isInteger(input.dx ?? 0) || !Number.isInteger(input.dy ?? 0) || !(input.dx || input.dy))) throw new Error('invalid_request');
     if (input.button !== undefined && !['left', 'right', 'middle'].includes(String(input.button))) throw new Error('invalid_request');
   }
   if (input.action === 'launch_app' && !input.application) throw new Error('invalid_request');

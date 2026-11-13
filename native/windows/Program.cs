@@ -297,6 +297,23 @@ internal static class Program
                     if (Math.Abs((long)dx) > 2000 || Math.Abs((long)dy) > 2000) throw new DesktopFailure("unsupported");
                     Send(new INPUT { Data = new InputUnion { Mouse = new MOUSEINPUT { X = dx, Y = dy, Flags = 1 } } });
                     break;
+                case "scroll":
+                    var scrollX = Number(request, "dx"); var scrollY = Number(request, "dy");
+                    if (Math.Abs((long)scrollX) > 2000 || Math.Abs((long)scrollY) > 2000 || scrollX == 0 && scrollY == 0) throw new DesktopFailure("unsupported");
+                    if (!SetCursorPos(frame.Bounds.X + frame.Bounds.Width / 2, frame.Bounds.Y + frame.Bounds.Height / 2)) throw new DesktopFailure("failed");
+                    var sentX = 0; var sentY = 0;
+                    for (var step = 1; step <= 24; step++)
+                    {
+                        if (Cancellation.IsCancellationRequested || ActiveGeneration != Volatile.Read(ref Generation)) throw new DesktopFailure("cancelled");
+                        FocusCheck(target); if (Bounds(target) != frame.Bounds) throw new DesktopFailure("stale");
+                        var eased = 1 - Math.Pow(1 - step / 24.0, 3);
+                        var nextX = (int)Math.Round(scrollX * eased); var nextY = (int)Math.Round(scrollY * eased);
+                        if (nextX != sentX) Send(new INPUT { Data = new InputUnion { Mouse = new MOUSEINPUT { Data = unchecked((uint)(nextX - sentX)), Flags = 0x1000 } } });
+                        if (nextY != sentY) Send(new INPUT { Data = new InputUnion { Mouse = new MOUSEINPUT { Data = unchecked((uint)(sentY - nextY)), Flags = 0x0800 } } });
+                        sentX = nextX; sentY = nextY;
+                        Thread.Sleep(12);
+                    }
+                    break;
                 case "keys":
                     var keys = request.GetProperty("keys").EnumerateArray().Select(value => KeyCode(value.GetString() ?? "")).ToArray();
                     if (keys.Length < 1 || keys.Length > 6 || keys.Any(key => (GetAsyncKeyState(key) & 0x8000) != 0)) throw new DesktopFailure("intervention");
@@ -304,10 +321,14 @@ internal static class Program
                     break;
                 case "text":
                     var text = String(request, "value"); if (text.Length > 8000) throw new DesktopFailure("unsupported");
+                    var typedCharacters = 0;
                     foreach (var character in text)
                     {
+                        if (Cancellation.IsCancellationRequested || ActiveGeneration != Volatile.Read(ref Generation)) throw new DesktopFailure("cancelled");
+                        FocusCheck(target);
                         Send(new INPUT { Type = 1, Data = new InputUnion { Keyboard = new KEYBDINPUT { Scan = character, Flags = 4 } } });
                         Send(new INPUT { Type = 1, Data = new InputUnion { Keyboard = new KEYBDINPUT { Scan = character, Flags = 6 } } });
+                        if (++typedCharacters % Math.Max(1, (int)Math.Ceiling(text.Length / 50.0)) == 0) Thread.Sleep(8);
                     }
                     break;
                 default: throw new DesktopFailure("unsupported");

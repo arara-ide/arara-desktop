@@ -691,6 +691,25 @@ static const char *input(Json request, int index) {
       XTestFakeButtonEvent(display, (unsigned int)held_button, True,
                            CurrentTime);
     }
+  } else if (!strcmp(operation, "scroll")) {
+    int dx = number(request, "dx", 0), dy = number(request, "dy", 0);
+    if (labs((long)dx) > 2000 || labs((long)dy) > 2000 || (!dx && !dy))
+      return "unsupported";
+    XTestFakeMotionEvent(display, -1, box.x + box.width / 2, box.y + box.height / 2, CurrentTime);
+    int horizontal = (abs(dx) + 79) / 80, vertical = (abs(dy) + 79) / 80;
+    for (int step = 0; step < horizontal + vertical; step++) {
+      Rectangle current;
+      if (cancelled || generation != active_generation)
+        return "cancelled";
+      if (!active(windows[index].handle) || !bounds(windows[index].handle, &current) || !same_bounds(current, box))
+        return "focus";
+      unsigned int button = step < vertical ? (dy > 0 ? 5 : 4) : (dx > 0 ? 7 : 6);
+      XTestFakeButtonEvent(display, button, True, CurrentTime);
+      XTestFakeButtonEvent(display, button, False, CurrentTime);
+      XFlush(display);
+      struct timespec delay = {0, 12000000};
+      nanosleep(&delay, NULL);
+    }
   } else if (!strcmp(operation, "relative_move")) {
     int dx = number(request, "dx", 0), dy = number(request, "dy", 0);
     if (labs((long)dx) > 2000 || labs((long)dy) > 2000)

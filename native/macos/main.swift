@@ -10,7 +10,9 @@ struct DesktopFailure: Error {
 
 struct WindowRef {
     let pid: pid_t
-    let element: AXUIElement
+    let element: AXUIElement?
+    var number: CGWindowID? = nil
+    var title: String = ""
 }
 
 struct ElementRef {
@@ -22,12 +24,36 @@ struct ElementRef {
 
 var windows: [String: WindowRef] = [:]
 var elements: [String: ElementRef] = [:]
+var previousElements: [String: ElementRef] = [:]
+
+func invalidateElements() {
+    if !elements.isEmpty { previousElements = elements }
+    elements.removeAll()
+}
+
+func textSlices(_ text: String) -> [String] {
+    let characters = Array(text)
+    let step = max(1, Int(ceil(Double(characters.count) / 50)))
+    return stride(from: 0, to: characters.count, by: step).map { String(characters[$0..<min(characters.count, $0 + step)]) }
+}
+
+func feedback(_ point: CGPoint, _ ref: WindowRef, click: Bool = false) throws {
+    DesktopFeedback.shared.move(point, pid: ref.pid, click: click)
+    guard !isCancelled() else { throw DesktopFailure(code: "cancelled") }
+    guard focused(ref) else { throw DesktopFailure(code: "focus") }
+}
 struct FrameRef {
     let window: String
     let bounds: CGRect
     let created: Date
+    let visual: Bool
 }
 var frames: [String: FrameRef] = [:]
+func rememberFrame(_ window: String, bounds: CGRect, visual: Bool) -> String {
+    let id = UUID().uuidString
+    frames = [id: FrameRef(window: window, bounds: bounds, created: Date(), visual: visual)]
+    return id
+}
 let cancellation = NSLock()
 var cancelled = false
 var cancellationGeneration = 0
@@ -38,6 +64,10 @@ func isCancelled() -> Bool {
     cancellation.lock()
     defer { cancellation.unlock() }
     return cancelled
+}
+func sessionLocked() -> Bool {
+    let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+    return (session["CGSSessionScreenIsLocked"] as? Bool) == true || NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.loginwindow"
 }
 func cancelInput() {
     cancellation.lock()
@@ -101,9 +131,18 @@ func accessibleApp(_ pid: pid_t) -> AXUIElement {
     return root
 }
 
+func windowTitle(_ ref: WindowRef) -> String {
+    let title = ref.element.map { string($0, kAXTitleAttribute) } ?? ""
+    return title.isEmpty ? ref.title : title
+}
+func isModalWindow(_ ref: WindowRef) -> Bool {
+    guard let element = ref.element else { return false }
+    return string(element, kAXRoleAttribute) == "AXSheet" || (attribute(element, "AXModal") as? Bool) == true
+}
 func windowMetadata(_ ref: WindowRef) -> [String: Any] {
-    var result: [String: Any] = ["title": string(ref.element, kAXTitleAttribute), "application": NSRunningApplication(processIdentifier: ref.pid)?.bundleIdentifier ?? ""]
-    var queue = [(ref.element, 0)]
+    var result: [String: Any] = ["title": windowTitle(ref), "application": NSRunningApplication(processIdentifier: ref.pid)?.bundleIdentifier ?? "", "accessibility": ref.element != nil, "modal": isModalWindow(ref), "active": focused(ref)]
+    guard let element = ref.element else { return result }
+    var queue = [(element, 0)]
     var visited = 0
     let started = Date()
     while !queue.isEmpty && visited < 200 && Date().timeIntervalSince(started) < 1 {
@@ -128,14 +167,32 @@ func listWindows(_ application: String?) -> [String: Any] {
     windows.removeAll()
     frames.removeAll()
     elements.removeAll()
+    previousElements.removeAll()
     var result: [[String: Any]] = []
+    let graphics = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
     for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && appAllowed(app.processIdentifier) && (application == nil || app.bundleIdentifier == application || String(app.processIdentifier) == application) {
         let root = accessibleApp(app.processIdentifier)
-        guard let children = attribute(root, kAXWindowsAttribute) as? [AXUIElement] else { continue }
-        for child in children.prefix(20) {
+        var children = attribute(root, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        if let focused = attribute(root, kAXFocusedWindowAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() {
+            let element = focused as! AXUIElement
+            var owner: pid_t = 0
+            if AXUIElementGetPid(element, &owner) == .success && owner == app.processIdentifier && !children.contains(where: { CFEqual($0, element) }) { children.insert(element, at: 0) }
+        }
+        let native = graphics.filter { $0[kCGWindowOwnerPID as String] as? Int == Int(app.processIdentifier) && $0[kCGWindowLayer as String] as? Int == 0 }
+        var discovered: [WindowRef] = []
+        for entry in native.prefix(20) {
+            guard let number = entry[kCGWindowNumber as String] as? CGWindowID, let raw = entry[kCGWindowBounds as String] as? NSDictionary, let box = CGRect(dictionaryRepresentation: raw), box.width > 1, box.height > 1 else { continue }
+            let child = children.first { element in
+                guard let rect = try? bounds(WindowRef(pid: app.processIdentifier, element: element)) else { return false }
+                return abs(rect.minX - box.minX) < 2 && abs(rect.minY - box.minY) < 2 && abs(rect.width - box.width) < 2 && abs(rect.height - box.height) < 2
+            }
+            discovered.append(WindowRef(pid: app.processIdentifier, element: child, number: number, title: entry[kCGWindowName as String] as? String ?? ""))
+        }
+        if discovered.isEmpty { discovered = children.prefix(20).map { WindowRef(pid: app.processIdentifier, element: $0) } }
+        for ref in discovered {
             let id = UUID().uuidString
-            windows[id] = WindowRef(pid: app.processIdentifier, element: child)
-            result.append(["windowId": id, "processId": app.processIdentifier, "app": app.localizedName ?? "", "title": String(string(child, kAXTitleAttribute).prefix(160)), "active": NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier])
+            windows[id] = ref
+            result.append(["windowId": id, "processId": app.processIdentifier, "app": app.localizedName ?? "", "title": String(windowTitle(ref).prefix(160)), "accessibility": ref.element != nil, "active": focused(ref), "modal": isModalWindow(ref)])
             if result.count >= 100 { return ["windows": result, "truncated": true] }
         }
     }
@@ -143,13 +200,17 @@ func listWindows(_ application: String?) -> [String: Any] {
 }
 
 func window(_ id: String) throws -> WindowRef {
-    guard let ref = windows[id], appAllowed(ref.pid), !string(ref.element, kAXRoleAttribute).isEmpty else { throw DesktopFailure(code: "stale") }
+    guard let ref = windows[id], appAllowed(ref.pid) else { throw DesktopFailure(code: "stale") }
+    if let element = ref.element { guard !string(element, kAXRoleAttribute).isEmpty else { throw DesktopFailure(code: "stale") } }
+    else { _ = try bounds(ref) }
     return ref
 }
 
 func snapshot(_ id: String) throws -> [String: Any] {
     let ref = try window(id)
-    var queue = [(ref.element, 0)]
+    let inputFrameId = rememberFrame(id, bounds: try bounds(ref), visual: false)
+    guard let element = ref.element else { return ["windowId": id, "nodes": [], "truncated": false, "accessibility": false, "inputFrameId": inputFrameId] }
+    var queue = [(element, 0)]
     var nodes: [[String: Any]] = []
     var visited: [AXUIElement] = []
     var retained: [String: ElementRef] = [:]
@@ -165,7 +226,8 @@ func snapshot(_ id: String) throws -> [String: Any] {
         let name = label(element)
         let actions = operations(element)
         if !role.isEmpty && (!name.isEmpty || !actions.isEmpty || role == kAXStaticTextRole || role == kAXTextAreaRole) {
-            let uid = elements.first(where: { $0.value.window == id && CFEqual($0.value.element, element) })?.key ?? UUID().uuidString
+            let known = elements.isEmpty ? previousElements : elements
+            let uid = known.first(where: { $0.value.window == id && CFEqual($0.value.element, element) })?.key ?? UUID().uuidString
             retained[uid] = ElementRef(window: id, element: element, role: role, name: name)
             var node: [String: Any] = ["uid": uid, "role": role, "name": name, "enabled": (attribute(element, kAXEnabledAttribute) as? Bool) ?? true, "operations": actions]
             if let value = attribute(element, kAXValueAttribute) as? String { node["value"] = String(value.prefix(240)) }
@@ -180,7 +242,8 @@ func snapshot(_ id: String) throws -> [String: Any] {
         }
     }
     elements = retained
-    return ["windowId": id, "nodes": nodes, "truncated": truncated]
+    previousElements = retained
+    return ["windowId": id, "nodes": nodes, "truncated": truncated, "inputFrameId": inputFrameId]
 }
 
 func target(_ request: [String: Any]) throws -> (WindowRef, ElementRef) {
@@ -199,26 +262,44 @@ func act(_ request: [String: Any]) throws -> [String: Any] {
     let operation = request["operation"] as? String ?? ""
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid else { throw DesktopFailure(code: "focus") }
     let root = AXUIElementCreateApplication(ref.pid)
-    guard let focused = attribute(root, kAXFocusedWindowAttribute), CFEqual(focused, ref.element) else { throw DesktopFailure(code: "focus") }
+    guard let focusedWindow = attribute(root, kAXFocusedWindowAttribute), let element = ref.element, CFEqual(focusedWindow, element) else { throw DesktopFailure(code: "focus") }
     guard operations(item.element).contains(operation) else { throw DesktopFailure(code: "unsupported") }
     guard (attribute(item.element, kAXEnabledAttribute) as? Bool) != false else { throw DesktopFailure(code: "stale") }
-    let result: AXError
+    if let rect = try? bounds(WindowRef(pid: ref.pid, element: item.element)) {
+        try feedback(CGPoint(x: rect.midX, y: rect.midY), ref, click: operation == "press")
+    }
+    var result: AXError = .success
     switch operation {
     case "press": result = AXUIElementPerformAction(item.element, kAXPressAction as CFString)
     case "focus": result = AXUIElementSetAttributeValue(item.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     case "set_value":
         guard let value = request["value"] as? String, value.count <= 8000 else { throw DesktopFailure(code: "unsupported") }
-        result = AXUIElementSetAttributeValue(item.element, kAXValueAttribute as CFString, value as CFString)
+        var typed = ""
+        let slices = textSlices(value)
+        for part in slices {
+            guard !isCancelled(), focused(ref) else { throw DesktopFailure(code: "focus") }
+            typed += part
+            result = AXUIElementSetAttributeValue(item.element, kAXValueAttribute as CFString, typed as CFString)
+            guard result == .success else { throw DesktopFailure(code: "failed") }
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { Thread.sleep(forTimeInterval: 0.008) }
+        }
+        if slices.isEmpty { result = AXUIElementSetAttributeValue(item.element, kAXValueAttribute as CFString, "" as CFString) }
     default: throw DesktopFailure(code: "unsupported")
     }
     guard result == .success else { throw DesktopFailure(code: "failed") }
-    elements.removeAll()
+    invalidateElements()
+    frames.removeAll()
     return ["performed": operation, "verified": false]
 }
 
 
 func bounds(_ ref: WindowRef) throws -> CGRect {
-    guard let position = attribute(ref.element, kAXPositionAttribute), let size = attribute(ref.element, kAXSizeAttribute) else { throw DesktopFailure(code: "stale") }
+    if let number = ref.number {
+        let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, number) as? [[String: Any]] ?? []
+        guard let entry = info.first, entry[kCGWindowOwnerPID as String] as? Int == Int(ref.pid), let raw = entry[kCGWindowBounds as String] as? NSDictionary, let box = CGRect(dictionaryRepresentation: raw), box.width > 0, box.height > 0 else { throw DesktopFailure(code: "stale") }
+        return box
+    }
+    guard let element = ref.element, let position = attribute(element, kAXPositionAttribute), let size = attribute(element, kAXSizeAttribute) else { throw DesktopFailure(code: "stale") }
     var point = CGPoint.zero
     var dimensions = CGSize.zero
     guard CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID(), AXValueGetValue(position as! AXValue, .cgPoint, &point), AXValueGetValue(size as! AXValue, .cgSize, &dimensions), dimensions.width > 0, dimensions.height > 0 else { throw DesktopFailure(code: "stale") }
@@ -245,22 +326,29 @@ func screenshot(_ request: [String: Any]) throws -> [String: Any] {
     guard let resized = context.makeImage(), let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { throw DesktopFailure(code: "failed") }
     CGImageDestinationAddImage(destination, resized, nil)
     guard CGImageDestinationFinalize(destination), data.length < 4000000 else { throw DesktopFailure(code: "failed") }
-    let frameId = UUID().uuidString
-    frames = [frameId: FrameRef(window: id, bounds: rect, created: Date())]
+    let frameId = rememberFrame(id, bounds: rect, visual: true)
     return ["frameId": frameId, "windowId": id, "width": width, "height": height, "coordinateWidth": rect.width, "coordinateHeight": rect.height, "images": [["data": data.base64EncodedString(), "mimeType": "image/png"]]]
 }
 
 let keyCodes: [String: CGKeyCode] = ["A": 0, "S": 1, "D": 2, "F": 3, "H": 4, "G": 5, "Z": 6, "X": 7, "C": 8, "V": 9, "B": 11, "Q": 12, "W": 13, "E": 14, "R": 15, "Y": 16, "T": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29, "O": 31, "U": 32, "I": 34, "P": 35, "L": 37, "J": 38, "K": 40, "N": 45, "M": 46, "ENTER": 36, "TAB": 48, "SPACE": 49, "BACKSPACE": 51, "ESCAPE": 53, "META": 55, "SHIFT": 56, "ALT": 58, "CTRL": 59, "LEFT": 123, "RIGHT": 124, "DOWN": 125, "UP": 126]
 
 func keyEvent(_ code: CGKeyCode, _ down: Bool) {
-    CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)?.post(tap: .cghidEventTap)
+    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { return }
+    event.flags = desktopModifierFlags(heldKeys)
+    if desktopModifierCodes[code] != nil { event.type = .flagsChanged }
+    event.post(tap: .cghidEventTap)
 }
 func mouseEvent(_ button: Int, _ down: Bool, _ point: CGPoint) {
     let type: CGEventType = button == 0 ? (down ? .leftMouseDown : .leftMouseUp) : button == 1 ? (down ? .rightMouseDown : .rightMouseUp) : (down ? .otherMouseDown : .otherMouseUp)
     CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: CGMouseButton(rawValue: UInt32(button))!)?.post(tap: .cghidEventTap)
 }
 func releaseInput() {
-    for code in heldKeys { keyEvent(code, false) }
+    let codes = heldKeys.sorted { left, right in
+        let leftModifier = desktopModifierCodes[left] != nil
+        let rightModifier = desktopModifierCodes[right] != nil
+        return leftModifier == rightModifier ? left < right : !leftModifier
+    }
+    for code in codes { heldKeys.remove(code); keyEvent(code, false) }
     let point = CGEvent(source: nil)?.location ?? .zero
     for button in heldButtons { mouseEvent(button, false, point) }
     heldKeys.removeAll()
@@ -271,26 +359,33 @@ func checkedFrame(_ request: [String: Any]) throws -> (WindowRef, FrameRef) {
     guard let frame = frames[request["frameId"] as? String ?? ""], frame.window == request["windowId"] as? String, Date().timeIntervalSince(frame.created) < 15, try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "stale") }
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid else { throw DesktopFailure(code: "focus") }
     let root = AXUIElementCreateApplication(ref.pid)
-    guard let focused = attribute(root, kAXFocusedWindowAttribute), CFEqual(focused, ref.element) else { throw DesktopFailure(code: "focus") }
+    guard focused(ref) else { throw DesktopFailure(code: "focus") }
     if let focusedElement = attribute(root, kAXFocusedUIElementAttribute), CFGetTypeID(focusedElement) == AXUIElementGetTypeID(), secure(focusedElement as! AXUIElement) { throw DesktopFailure(code: "secure") }
     return (ref, frame)
 }
 func focused(_ ref: WindowRef) -> Bool {
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid else { return false }
+    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    guard front == ref.pid else { return false }
+    if let number = ref.number, ref.element == nil {
+        let graphics = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return graphics.first { $0[kCGWindowOwnerPID as String] as? Int == Int(ref.pid) && $0[kCGWindowLayer as String] as? Int == 0 }?[kCGWindowNumber as String] as? CGWindowID == number
+    }
     let root = AXUIElementCreateApplication(ref.pid)
     guard let current = attribute(root, kAXFocusedWindowAttribute) else { return false }
-    return CFEqual(current, ref.element)
+    return ref.element.map { CFEqual(current, $0) } ?? false
 }
 func input(_ request: [String: Any]) throws -> [String: Any] {
     let (ref, frame) = try checkedFrame(request)
     let operation = request["operation"] as? String ?? ""
+    guard frame.visual || ["keys", "text"].contains(operation) && (request["dx"] as? Int ?? 0) == 0 && (request["dy"] as? Int ?? 0) == 0 else { throw DesktopFailure(code: "visual_frame_required") }
     let duration = request["durationMs"] as? Int ?? 0
     guard duration >= 0 && duration <= 5000 else { throw DesktopFailure(code: "unsupported") }
     guard !isCancelled() else { throw DesktopFailure(code: "cancelled") }
-    defer { releaseInput(); frames.removeAll(); elements.removeAll() }
+    defer { releaseInput(); frames.removeAll(); invalidateElements() }
     if operation == "move" || operation == "click" {
         guard let x = request["x"] as? Double, let y = request["y"] as? Double, x.isFinite, y.isFinite, x >= 0, y >= 0, x < frame.bounds.width, y < frame.bounds.height else { throw DesktopFailure(code: "unsupported") }
         let point = CGPoint(x: frame.bounds.minX + x, y: frame.bounds.minY + y)
+        try feedback(point, ref, click: operation == "click")
         CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
         if operation == "click" {
             let button = request["button"] as? String ?? "left"
@@ -299,18 +394,40 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
             heldButtons.insert(code)
             mouseEvent(code, true, point)
         }
+    } else if operation == "scroll" {
+        let dx = request["dx"] as? Int ?? 0
+        let dy = request["dy"] as? Int ?? 0
+        guard abs(dx) <= 2000 && abs(dy) <= 2000, dx != 0 || dy != 0 else { throw DesktopFailure(code: "unsupported") }
+        let point = CGPoint(x: frame.bounds.midX, y: frame.bounds.midY)
+        try feedback(point, ref)
+        CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        let steps = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1 : 24
+        var movedX = 0
+        var movedY = 0
+        for step in 1...steps {
+            guard !isCancelled(), focused(ref), try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "focus") }
+            let progress = Double(step) / Double(steps)
+            let eased = 1 - pow(1 - progress, 3)
+            let nextX = Int((Double(dx) * eased).rounded())
+            let nextY = Int((Double(dy) * eased).rounded())
+            CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(movedY - nextY), wheel2: Int32(movedX - nextX), wheel3: 0)?.post(tap: .cghidEventTap)
+            movedX = nextX; movedY = nextY
+            if steps > 1 { Thread.sleep(forTimeInterval: 0.012) }
+        }
     } else if operation == "relative_move" {
         let dx = request["dx"] as? Int ?? 0
         let dy = request["dy"] as? Int ?? 0
         guard abs(dx) <= 2000 && abs(dy) <= 2000 else { throw DesktopFailure(code: "unsupported") }
         let current = CGEvent(source: nil)?.location ?? frame.bounds.origin
         let point = CGPoint(x: min(max(current.x + Double(dx), frame.bounds.minX), frame.bounds.maxX - 1), y: min(max(current.y + Double(dy), frame.bounds.minY), frame.bounds.maxY - 1))
+        try feedback(point, ref)
         guard let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else { throw DesktopFailure(code: "failed") }
         event.setIntegerValueField(.mouseEventDeltaX, value: Int64(dx))
         event.setIntegerValueField(.mouseEventDeltaY, value: Int64(dy))
         event.post(tap: .cghidEventTap)
     } else if operation == "keys" {
         guard let keys = request["keys"] as? [String], !keys.isEmpty, keys.count <= 6 else { throw DesktopFailure(code: "unsupported") }
+        guard !desktopModifierCodes.keys.contains(where: { CGEventSource.keyState(.combinedSessionState, key: $0) }) else { throw DesktopFailure(code: "intervention") }
         let codes = try keys.map { key -> CGKeyCode in
             guard let code = keyCodes[key.uppercased()] else { throw DesktopFailure(code: "unsupported") }
             guard !CGEventSource.keyState(.combinedSessionState, key: code) else { throw DesktopFailure(code: "intervention") }
@@ -319,13 +436,16 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
         for code in codes { heldKeys.insert(code); keyEvent(code, true) }
     } else if operation == "text" {
         guard let text = request["value"] as? String, text.utf16.count <= 8000 else { throw DesktopFailure(code: "unsupported") }
-        let values = Array(text.utf16)
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { throw DesktopFailure(code: "failed") }
-        values.withUnsafeBufferPointer { buffer in event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress) }
-        event.post(tap: .cghidEventTap)
-        guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { throw DesktopFailure(code: "failed") }
-        values.withUnsafeBufferPointer { buffer in up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress) }
-        up.post(tap: .cghidEventTap)
+        for part in textSlices(text) {
+            guard !isCancelled(), focused(ref) else { throw DesktopFailure(code: "focus") }
+            let values = Array(part.utf16)
+            for down in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { throw DesktopFailure(code: "failed") }
+                values.withUnsafeBufferPointer { buffer in event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress) }
+                event.post(tap: .cghidEventTap)
+            }
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { Thread.sleep(forTimeInterval: 0.008) }
+        }
     } else { throw DesktopFailure(code: "unsupported") }
     let cameraX = operation == "keys" ? request["dx"] as? Int ?? 0 : 0
     let cameraY = operation == "keys" ? request["dy"] as? Int ?? 0 : 0
@@ -359,9 +479,11 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     guard request["version"] as? Int == 1 else { throw DesktopFailure(code: "unsupported") }
     let action = request["action"] as? String ?? ""
     if action == "status" {
-        return ["appVersion": appVersion, "platform": "darwin", "accessibility": AXIsProcessTrusted(), "actions": ["list_windows", "focus_window", "take_snapshot", "read", "act", "take_screenshot", "input", "launch_app", "stop"], "screenshots": CGPreflightScreenCaptureAccess(), "input": AXIsProcessTrusted(), "audio": false]
+        let locked = sessionLocked()
+        return ["appVersion": appVersion, "platform": "darwin", "accessibility": AXIsProcessTrusted(), "actions": ["list_windows", "focus_window", "take_snapshot", "read", "act", "take_screenshot", "input", "launch_app", "stop"], "screenshots": CGPreflightScreenCaptureAccess(), "input": AXIsProcessTrusted() && !locked, "sessionLocked": locked, "audio": false]
     }
-    if action == "stop" { releaseInput(); frames.removeAll(); return ["stopped": true] }
+    if action == "stop" { releaseInput(); frames.removeAll(); DesktopFeedback.shared.stop(); return ["stopped": true] }
+    if ["input", "act", "focus_window"].contains(action) && sessionLocked() { throw DesktopFailure(code: "session_locked") }
     guard AXIsProcessTrusted() else { throw DesktopFailure(code: "permission") }
     switch action {
     case "window_info":
@@ -378,8 +500,11 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     case "list_windows": return listWindows(request["application"] as? String)
     case "focus_window":
         let ref = try window(request["windowId"] as? String ?? "")
-        guard let app = NSRunningApplication(processIdentifier: ref.pid), app.activate(options: [.activateIgnoringOtherApps]) else { throw DesktopFailure(code: "failed") }
-        guard AXUIElementPerformAction(ref.element, kAXRaiseAction as CFString) == .success else { throw DesktopFailure(code: "failed") }
+        guard let app = NSRunningApplication(processIdentifier: ref.pid), DispatchQueue.main.sync(execute: { app.activate(options: [.activateIgnoringOtherApps]) }) else { throw DesktopFailure(code: "failed") }
+        if let element = ref.element, !focused(ref) { AXUIElementPerformAction(element, kAXRaiseAction as CFString) }
+        let deadline = Date().addingTimeInterval(0.6)
+        while !focused(ref) && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+        guard focused(ref) else { throw DesktopFailure(code: "focus") }
         elements.removeAll()
         return ["focused": true]
     case "take_snapshot": return try snapshot(request["windowId"] as? String ?? "")
@@ -396,6 +521,9 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
 }
 
 var inputStat = stat()
+if let icon = NSImage(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/arara-desktop.icns")) {
+    NSApplication.shared.applicationIconImage = icon
+}
 let hasInputPipe = fstat(STDIN_FILENO, &inputStat) == 0 && (inputStat.st_mode & S_IFMT == S_IFIFO || inputStat.st_mode & S_IFMT == S_IFSOCK || inputStat.st_mode & S_IFMT == S_IFREG)
 if CommandLine.arguments.contains("--permissions") || !hasInputPipe && isatty(STDIN_FILENO) == 0 {
     let locale = Locale.preferredLanguages.first ?? "en"
@@ -432,6 +560,7 @@ requests.maxConcurrentOperationCount = 1
 
 _ = NSApplication.shared
 _ = NSWorkspace.shared
+let feedbackFocus = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in DesktopFeedback.shared.checkFocus() }
 DispatchQueue.global(qos: .userInitiated).async {
 while let line = readLine() {
     guard let data = line.data(using: .utf8), let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
