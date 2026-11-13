@@ -3,6 +3,11 @@ on:
   push:
     branches: [main, development]
   workflow_dispatch:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        description: Publish a verified stable package from main
 permissions:
   contents: read
 jobs:
@@ -36,8 +41,37 @@ jobs:
       - run: npm run test:native -- --status
       - if: runner.os == 'Linux'
         run: dbus-run-session -- xvfb-run -a node scripts/test-native.mjs
+      - run: node scripts/package.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-${{ runner.os }}-${{ runner.arch }}
-          path: dist/
+          path: packages/
           retention-days: 14
+  release:
+    needs: native
+    if: github.ref == 'refs/heads/main' && inputs.publish == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: artifacts
+      - name: Collect verified packages
+        shell: bash
+        run: |
+          mkdir release
+          find artifacts -name '*.tar.gz' -exec cp {} release/ \;
+          find artifacts -name SHA256SUMS -exec cat {} \; > release/SHA256SUMS
+          cd release
+          sha256sum -c SHA256SUMS
+      - name: Publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          gh release create "v$version" release/* --title "Arara Desktop $version" --notes-file README.md --verify-tag=false

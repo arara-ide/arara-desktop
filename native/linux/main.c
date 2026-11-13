@@ -461,6 +461,15 @@ static const char *execute(Json request) {
  return NULL;
  }
     if (!display) return "session_unavailable";
+    if (!strcmp(action, "launch_app")) {
+        char application[200]; text(member(request, "application"), application, sizeof(application));
+        if (!application[0] || application[0] == '-') return "unsupported";
+        for (int i = 0; application[i]; i++) if (!isalnum((unsigned char)application[i]) && application[i] != '.' && application[i] != '_' && application[i] != '-') return "unsupported";
+        pid_t child = fork();
+        if (child == 0) { execlp("gtk-launch", "gtk-launch", application, (char *)NULL); _exit(127); }
+        if (child < 0) return "failed";
+        printf("{\"requested\":true}"); return NULL;
+    }
     if (!strcmp(action, "list_windows")) return list_windows(request);
     int index = select_window(request);
  if (index < 0) return "stale";
