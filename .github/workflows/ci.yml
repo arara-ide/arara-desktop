@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
         if: runner.os == 'Windows'
         with:
           dotnet-version: '10.0.x'
@@ -76,4 +76,4 @@ jobs:
         shell: bash
         run: |
           version=$(node -p "require('./package.json').version")
-          gh release create "v$version" release/* --title "Arara Desktop $version" --notes-file README.md --verify-tag=false
+          gh release create "v$version" release/* --target "${{ github.sha }}" --title "Arara Desktop $version" --notes-file README.md
