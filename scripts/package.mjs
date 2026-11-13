@@ -8,6 +8,6 @@ mkdirSync('packages', { recursive: true });
 const name = `arara-desktop-${process.platform}-${process.arch}.tar.gz`;
 const source = process.platform === 'darwin' ? 'Arara Desktop.app' : process.platform === 'win32' ? 'arara-desktop.exe' : 'arara-desktop';
 const target = join('packages', name);
-const result = spawnSync('tar', ['-czf', target, '-C', 'dist', source, ...(process.platform === 'linux' ? ['arara-desktop.png'] : [])], { stdio: 'inherit' });
+const result = spawnSync('tar', ['-czf', target, '-C', 'dist', source, ...(process.platform === 'darwin' ? [] : ['version.json']), ...(process.platform === 'linux' ? ['arara-desktop.png'] : [])], { stdio: 'inherit' });
 if (result.status !== 0) throw new Error('Packaging failed');
 writeFileSync(join('packages', 'SHA256SUMS'), `${createHash('sha256').update(readFileSync(target)).digest('hex')}  ${name}\n`);

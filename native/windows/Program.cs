@@ -338,7 +338,7 @@ internal static class Program
     {
         if (Number(request, "version") != 1) throw new DesktopFailure("unsupported");
         var action = String(request, "action");
-        if (action == "status") return new { platform = "win32", accessibility = Environment.UserInteractive, input = Environment.UserInteractive, screenshots = Environment.UserInteractive, audio = false, actions = new[] { "list_windows", "take_snapshot", "read", "act", "focus_window", "take_screenshot", "input", "launch_app", "stop" } };
+        if (action == "status") return new { appVersion = typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).Cast<System.Reflection.AssemblyInformationalVersionAttribute>().Single().InformationalVersion.Split('+')[0], platform = "win32", accessibility = Environment.UserInteractive, input = Environment.UserInteractive, screenshots = Environment.UserInteractive, audio = false, actions = new[] { "list_windows", "take_snapshot", "read", "act", "focus_window", "take_screenshot", "input", "launch_app", "stop" } };
         if (action == "stop") { ReleaseInput(); Frames.Clear(); return new { stopped = true }; }
         if (action == "list_windows") return ListWindows(request);
         if (action == "launch_app")

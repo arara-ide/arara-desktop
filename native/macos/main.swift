@@ -359,7 +359,7 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     guard request["version"] as? Int == 1 else { throw DesktopFailure(code: "unsupported") }
     let action = request["action"] as? String ?? ""
     if action == "status" {
-        return ["platform": "darwin", "accessibility": AXIsProcessTrusted(), "actions": ["list_windows", "focus_window", "take_snapshot", "read", "act", "take_screenshot", "input", "launch_app", "stop"], "screenshots": CGPreflightScreenCaptureAccess(), "input": AXIsProcessTrusted(), "audio": false]
+        return ["appVersion": appVersion, "platform": "darwin", "accessibility": AXIsProcessTrusted(), "actions": ["list_windows", "focus_window", "take_snapshot", "read", "act", "take_screenshot", "input", "launch_app", "stop"], "screenshots": CGPreflightScreenCaptureAccess(), "input": AXIsProcessTrusted(), "audio": false]
     }
     if action == "stop" { releaseInput(); frames.removeAll(); return ["stopped": true] }
     guard AXIsProcessTrusted() else { throw DesktopFailure(code: "permission") }
