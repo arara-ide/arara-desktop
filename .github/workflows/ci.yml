@@ -26,6 +26,13 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: runner.os == 'macOS'
+        with:
+          repository: arara-ide/arara-browser
+          ref: ${{ github.ref_name }}
+          path: .work/arara-browser
+          persist-credentials: false
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
         if: runner.os == 'Windows'
         with:
