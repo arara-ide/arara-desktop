@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+    branches: [main, development]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-dotnet@v5
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: '10.0.x'
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxtst-dev zlib1g-dev xvfb openbox libatspi2.0-0 dbus-x11
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run check:i18n
+      - run: npm run build
+      - run: npm run test:native -- --status
+      - if: runner.os == 'Linux'
+        run: dbus-run-session -- xvfb-run -a node scripts/test-native.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-${{ runner.os }}-${{ runner.arch }}
+          path: dist/
+          retention-days: 14
