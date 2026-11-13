@@ -1,3 +1,6 @@
 {
-  "desktop.name": "Arara Desktop"
+  "desktop.name": "Arara Desktop",
+  "setup.detail": "Acessibilidade pode aparecer como Controle do Dispositivo e Acesso a Dados na sua versão do macOS. Antes de continuar, mova Arara Desktop para Aplicativos. Em Privacidade e Segurança, permita Acessibilidade para Arara Desktop; captura de janela exige Gravação da Tela. Não usamos áudio. Se a permissão estiver ativa e continuar falhando após atualização, remova a entrada antiga de Arara Desktop e adicione o app de Aplicativos novamente. Confira também Arara Code quando o macOS atribuir a solicitação ao host. Reabra os apps depois. Permissões de áudio ou de ignorar o seletor privado não são necessárias para este helper.",
+  "setup.continue": "Continuar",
+  "setup.cancel": "Cancelar"
 }

@@ -11,7 +11,8 @@
     "test": "vitest run",
     "build": "node scripts/build.mjs",
     "test:native": "node scripts/test-native.mjs",
-    "check:i18n": "node scripts/check-i18n.mjs"
+    "check:i18n": "node scripts/check-i18n.mjs",
+    "build:icons": "node scripts/icons.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.1",

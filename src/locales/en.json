@@ -1,3 +1,6 @@
 {
-  "desktop.name": "Arara Desktop"
+  "desktop.name": "Arara Desktop",
+  "setup.detail": "Accessibility may be named Device Control & Data Access on your macOS version. Before continuing, move Arara Desktop to Applications. In Privacy & Security, allow Accessibility for Arara Desktop; window capture requires Screen Recording. Audio is not used. If access is enabled but fails after an update, remove the old Arara Desktop entry and add the app from Applications again. Also check Arara Code when macOS attributes the request to the host. Reopen the apps afterwards. Audio and bypassing the private window picker are not required by this helper.",
+  "setup.continue": "Continue",
+  "setup.cancel": "Cancel"
 }

@@ -1,3 +1,4 @@
+using System.IO;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -18,7 +19,9 @@ internal static class Program
     private static readonly Dictionary<string, Frame> Frames = [];
     private static readonly HashSet<ushort> Keys = [];
     private static readonly HashSet<string> Buttons = [];
-    private static readonly BlockingCollection<string> Requests = new(16);
+    private static readonly BlockingCollection<(string Line, int Generation)> Requests = new(16);
+    private static int Generation;
+    private static int ActiveGeneration;
     private static CancellationTokenSource Cancellation = new();
     private static readonly object CancellationLock = new();
     private static JsonSerializerOptions JsonOptions => new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -26,6 +29,7 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        if (Environment.GetCommandLineArgs().Contains("--fixture") || Environment.GetCommandLineArgs().Contains("--fixture-standard")) { Fixture.Run(); return; }
         SetProcessDpiAwarenessContext(new IntPtr(-4));
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; Cancel(); };
         var worker = new Thread(Work) { IsBackground = false };
@@ -41,7 +45,7 @@ internal static class Program
                 if (String(parsed.RootElement, "action") == "stop") Cancel();
             }
             catch (JsonException) { Reply(null, "invalid_request"); continue; }
-            Requests.Add(line);
+            Requests.Add((line, Volatile.Read(ref Generation)));
         }
         Cancel();
         Requests.CompleteAdding();
@@ -52,11 +56,13 @@ internal static class Program
     {
         try
         {
-            foreach (var line in Requests.GetConsumingEnumerable())
+            foreach (var queued in Requests.GetConsumingEnumerable())
             {
                 try
                 {
-                    using var parsed = JsonDocument.Parse(line);
+                    using var parsed = JsonDocument.Parse(queued.Line);
+                    ActiveGeneration = queued.Generation;
+                    if (ActiveGeneration != Volatile.Read(ref Generation) && String(parsed.RootElement, "action") is not ("status" or "stop")) throw new DesktopFailure("cancelled");
                     Reply(Execute(parsed.RootElement), null);
                 }
                 catch (DesktopFailure error) { Reply(null, error.Message); }
@@ -73,7 +79,7 @@ internal static class Program
     }
     private static string String(JsonElement request, string key) => request.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
     private static int Number(JsonElement request, string key, int fallback = 0) => request.TryGetProperty(key, out var value) && value.TryGetInt32(out var number) ? number : fallback;
-    private static void Cancel() { lock (CancellationLock) Cancellation.Cancel(); }
+    private static void Cancel() { Interlocked.Increment(ref Generation); lock (CancellationLock) Cancellation.Cancel(); }
     private static Target Window(string id)
     {
         if (!Windows.TryGetValue(id, out var target) || !IsWindow(target.Handle)) throw new DesktopFailure("stale");
@@ -94,9 +100,18 @@ internal static class Program
                 if (!OpenProcessToken(process, 8, out var token)) return false;
                 try
                 {
-                    var elevation = 0;
-                    if (!GetTokenInformation(token, 20, ref elevation, 4, out _)) return false;
-                    return elevation == 0 && IsWindowVisible(handle);
+                    GetTokenInformationBuffer(token, 25, IntPtr.Zero, 0, out var needed);
+                    if (needed <= 0 || needed > 4096) return false;
+                    var buffer = Marshal.AllocHGlobal(needed);
+                    try
+                    {
+                        if (!GetTokenInformationBuffer(token, 25, buffer, needed, out _)) return false;
+                        var sid = Marshal.ReadIntPtr(buffer);
+                        var count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+                        var integrity = Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+                        return integrity < 0x3000 && IsWindowVisible(handle);
+                    }
+                    finally { Marshal.FreeHGlobal(buffer); }
                 }
                 finally { CloseHandle(token); }
             }
@@ -170,6 +185,36 @@ internal static class Program
         }
         Nodes.Clear(); foreach (var pair in next) Nodes[pair.Key] = pair.Value;
         return new { windowId = id, nodes, truncated = queue.Count > 0 };
+    }
+    private static object WindowMetadata(Target target)
+    {
+        var result = new Dictionary<string, object> { ["title"] = target.Element.Current.Name, ["application"] = Process.GetProcessById(target.ProcessId).ProcessName };
+        var queue = new Queue<(AutomationElement Element, int Depth)>();
+        queue.Enqueue((target.Element, 0));
+        var watch = Stopwatch.StartNew();
+        var visited = 0;
+        while (queue.TryDequeue(out var item) && visited++ < 200 && watch.ElapsedMilliseconds < 1000)
+        {
+            try
+            {
+                if (item.Element.Current.IsPassword) continue;
+                if (item.Element.Current.ControlType == ControlType.Document)
+                {
+                    result["documentTitle"] = item.Element.Current.Name;
+                    if (item.Element.TryGetCurrentPattern(ValuePattern.Pattern, out var value))
+                    {
+                        var url = ((ValuePattern)value).Current.Value;
+                        if (Uri.TryCreate(url, UriKind.Absolute, out _)) result["documentUrl"] = url[..Math.Min(url.Length, 2000)];
+                    }
+                    break;
+                }
+                if (item.Depth >= 12) continue;
+                var child = TreeWalker.ControlViewWalker.GetFirstChild(item.Element);
+                for (var count = 0; child != null && count < 100; count++) { queue.Enqueue((child, item.Depth + 1)); child = TreeWalker.ControlViewWalker.GetNextSibling(child); }
+            }
+            catch (ElementNotAvailableException) { }
+        }
+        return result;
     }
     private static Node TargetNode(JsonElement request)
     {
@@ -267,11 +312,27 @@ internal static class Program
                     break;
                 default: throw new DesktopFailure("unsupported");
             }
+            var cameraX = operation == "keys" ? Number(request, "dx") : 0;
+            var cameraY = operation == "keys" ? Number(request, "dy") : 0;
+            if (Math.Abs((long)cameraX) > 2000 || Math.Abs((long)cameraY) > 2000) throw new DesktopFailure("unsupported");
             var watch = Stopwatch.StartNew();
-            while (watch.ElapsedMilliseconds < duration) { if (Cancellation.IsCancellationRequested) throw new DesktopFailure("cancelled"); FocusCheck(target); if (Bounds(target) != frame.Bounds) throw new DesktopFailure("stale"); Thread.Sleep(10); }
+            var movedX = 0; var movedY = 0;
+            while (watch.ElapsedMilliseconds < duration)
+            {
+                if (Cancellation.IsCancellationRequested || ActiveGeneration != Volatile.Read(ref Generation)) throw new DesktopFailure("cancelled");
+                FocusCheck(target); if (Bounds(target) != frame.Bounds) throw new DesktopFailure("stale");
+                if (cameraX != 0 || cameraY != 0)
+                {
+                    var progress = Math.Min(1.0, watch.ElapsedMilliseconds / (double)Math.Max(1, duration));
+                    var nextX = (int)(cameraX * progress); var nextY = (int)(cameraY * progress);
+                    Send(new INPUT { Data = new InputUnion { Mouse = new MOUSEINPUT { X = nextX - movedX, Y = nextY - movedY, Flags = 1 } } });
+                    movedX = nextX; movedY = nextY;
+                }
+                Thread.Sleep(10);
+            }
             return new { performed = operation, released = true, verified = false };
         }
-        finally { ReleaseInput(); Frames.Clear(); }
+        finally { ReleaseInput(); Frames.Clear(); Nodes.Clear(); }
     }
     private static object Execute(JsonElement request)
     {
@@ -287,6 +348,7 @@ internal static class Program
             Process.Start(new ProcessStartInfo(application) { UseShellExecute = false }); return new { requested = true };
         }
         var id = String(request, "windowId"); var target = Window(id);
+        if (action == "window_info") return WindowMetadata(target);
         if (action == "focus_window") { if (!SetForegroundWindow(target.Handle)) throw new DesktopFailure("focus"); Nodes.Clear(); return new { focused = true }; }
         if (action == "take_snapshot") return Snapshot(id);
         if (action == "take_screenshot") return Screenshot(id);
@@ -330,5 +392,8 @@ internal static class Program
     [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint process);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
     [DllImport("advapi32.dll")] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation")] private static extern bool GetTokenInformationBuffer(IntPtr token, int information, IntPtr value, int size, out int needed);
+    [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+    [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
     [DllImport("advapi32.dll")] private static extern bool GetTokenInformation(IntPtr token, int information, ref int value, int size, out int needed);
 }

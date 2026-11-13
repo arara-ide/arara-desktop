@@ -6,7 +6,7 @@ Adapter local de acessibilidade e entrada para macOS, Windows e Linux. Comunica�
 
 ## Desenvolvimento
 
-Node 22/24 para as verificações; Xcode no macOS, .NET 10 no Windows e compilador C com X11/XTest no Linux. Acessibilidade Linux usa AT-SPI quando disponível. Em Wayland, input/captura exigem sessão de portal compatível; indisponibilidade é anunciada explicitamente, sem usar XWayland para contornar o isolamento.
+Node 22/24 para as verificações; Xcode no macOS, .NET 10 no Windows e compilador C com X11/XTest no Linux. Acessibilidade Linux usa AT-SPI quando disponível, inclusive em sessões Wayland. O fallback visual de Linux está implementado para X11. Em Wayland, o adapter anuncia input/captura indisponíveis; uma sessão de portal compatível ainda precisa ser implementada; indisponibilidade é anunciada explicitamente, sem usar XWayland para contornar o isolamento.
 
 ```sh
 npm ci
@@ -27,3 +27,7 @@ Cada linha contém `version: 1` e `action`; a resposta possui `version: 1` e `re
 Use acessibilidade primeiro. `take_screenshot {windowId}` devolve PNG limitado e `frameId`, dimensões da imagem e dimensões lógicas da janela. `input` exige esse frame recente e a mesma janela em foco. `x/y` são coordenadas lógicas relativas à janela, não pixels da imagem nem coordenadas globais. `relative_move` usa `dx/dy`; suporte ao movimento de câmera depende do aplicativo. `keys` e `click` mantêm o input por `durationMs`, no máximo cinco segundos, e liberam ao terminar, cancelar, perder foco ou encerrar o stdin. Não há `key_down`/`mouse_down` sem prazo.
 
 Nenhum adapter pode garantir que um jogo aceite input sintético; confirme o efeito pela próxima observação. Sistemas sem ambiente gráfico ou sem consentimento retornam capacidade ausente. Testes sem acesso real não comprovam controle nativo.
+
+## Marca
+
+A arara com gradiente verde em `assets/arara.svg` usa a geometria pública de `arara-code/branding/icons/arara.svg`. Os arquivos PNG, ICNS e ICO são derivados versionados. `PLAYWRIGHT_PATH=<caminho de desenvolvimento do Playwright> npm run build:icons` os regenera; o renderizador é ferramenta de desenvolvimento, sem dependência de runtime do adapter. O bundle macOS, o executável Windows e o pacote Linux incluem seus ícones.

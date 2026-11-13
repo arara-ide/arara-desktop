@@ -30,6 +30,7 @@ struct FrameRef {
 var frames: [String: FrameRef] = [:]
 let cancellation = NSLock()
 var cancelled = false
+var cancellationGeneration = 0
 var heldKeys: Set<CGKeyCode> = []
 var heldButtons: Set<Int> = []
 
@@ -41,6 +42,7 @@ func isCancelled() -> Bool {
 func cancelInput() {
     cancellation.lock()
     cancelled = true
+    cancellationGeneration += 1
     cancellation.unlock()
 }
 func beginInput() {
@@ -91,19 +93,49 @@ func appAllowed(_ pid: pid_t) -> Bool {
     return !blockedApps.contains(app.bundleIdentifier ?? "")
 }
 
+func accessibleApp(_ pid: pid_t) -> AXUIElement {
+    let root = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(root, 0.25)
+    AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    return root
+}
+
+func windowMetadata(_ ref: WindowRef) -> [String: Any] {
+    var result: [String: Any] = ["title": string(ref.element, kAXTitleAttribute), "application": NSRunningApplication(processIdentifier: ref.pid)?.bundleIdentifier ?? ""]
+    var queue = [(ref.element, 0)]
+    var visited = 0
+    let started = Date()
+    while !queue.isEmpty && visited < 200 && Date().timeIntervalSince(started) < 1 {
+        let (element, depth) = queue.removeFirst()
+        visited += 1
+        if secure(element) { continue }
+        if string(element, kAXRoleAttribute) == "AXWebArea" {
+            result["documentTitle"] = label(element)
+            if let url = attribute(element, kAXURLAttribute) as? URL { result["documentUrl"] = String(url.absoluteString.prefix(2000)) }
+            else if let url = attribute(element, kAXURLAttribute) as? String { result["documentUrl"] = String(url.prefix(2000)) }
+            break
+        }
+        if depth < 12, let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+            queue.append(contentsOf: children.prefix(100).map { ($0, depth + 1) })
+        }
+    }
+    return result
+}
+
 func listWindows(_ application: String?) -> [String: Any] {
+    beginInput()
     windows.removeAll()
     frames.removeAll()
     elements.removeAll()
     var result: [[String: Any]] = []
-    for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && appAllowed(app.processIdentifier) && (application == nil || app.bundleIdentifier == application) {
-        let root = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 0.25)
+    for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && appAllowed(app.processIdentifier) && (application == nil || app.bundleIdentifier == application || String(app.processIdentifier) == application) {
+        let root = accessibleApp(app.processIdentifier)
         guard let children = attribute(root, kAXWindowsAttribute) as? [AXUIElement] else { continue }
         for child in children.prefix(20) {
             let id = UUID().uuidString
             windows[id] = WindowRef(pid: app.processIdentifier, element: child)
-            result.append(["windowId": id, "app": app.localizedName ?? "", "title": String(string(child, kAXTitleAttribute).prefix(160)), "active": NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier])
+            result.append(["windowId": id, "processId": app.processIdentifier, "app": app.localizedName ?? "", "title": String(string(child, kAXTitleAttribute).prefix(160)), "active": NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier])
             if result.count >= 100 { return ["windows": result, "truncated": true] }
         }
     }
@@ -184,13 +216,6 @@ func act(_ request: [String: Any]) throws -> [String: Any] {
     return ["performed": operation, "verified": false]
 }
 
-func isTrusted(prompt: Bool = false) -> Bool {
-    if prompt {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
-    }
-    return AXIsProcessTrusted()
-}
 
 func bounds(_ ref: WindowRef) throws -> CGRect {
     guard let position = attribute(ref.element, kAXPositionAttribute), let size = attribute(ref.element, kAXSizeAttribute) else { throw DesktopFailure(code: "stale") }
@@ -246,17 +271,23 @@ func checkedFrame(_ request: [String: Any]) throws -> (WindowRef, FrameRef) {
     guard let frame = frames[request["frameId"] as? String ?? ""], frame.window == request["windowId"] as? String, Date().timeIntervalSince(frame.created) < 15, try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "stale") }
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid else { throw DesktopFailure(code: "focus") }
     let root = AXUIElementCreateApplication(ref.pid)
-    guard let focused = attribute(root, kAXFocusedWindowAttribute), CFEqual(focused, ref.element), let focusedElement = attribute(root, kAXFocusedUIElementAttribute) else { throw DesktopFailure(code: "focus") }
-    if CFGetTypeID(focusedElement) == AXUIElementGetTypeID(), secure(focusedElement as! AXUIElement) { throw DesktopFailure(code: "secure") }
+    guard let focused = attribute(root, kAXFocusedWindowAttribute), CFEqual(focused, ref.element) else { throw DesktopFailure(code: "focus") }
+    if let focusedElement = attribute(root, kAXFocusedUIElementAttribute), CFGetTypeID(focusedElement) == AXUIElementGetTypeID(), secure(focusedElement as! AXUIElement) { throw DesktopFailure(code: "secure") }
     return (ref, frame)
+}
+func focused(_ ref: WindowRef) -> Bool {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid else { return false }
+    let root = AXUIElementCreateApplication(ref.pid)
+    guard let current = attribute(root, kAXFocusedWindowAttribute) else { return false }
+    return CFEqual(current, ref.element)
 }
 func input(_ request: [String: Any]) throws -> [String: Any] {
     let (ref, frame) = try checkedFrame(request)
     let operation = request["operation"] as? String ?? ""
     let duration = request["durationMs"] as? Int ?? 0
     guard duration >= 0 && duration <= 5000 else { throw DesktopFailure(code: "unsupported") }
-    beginInput()
-    defer { releaseInput(); frames.removeAll() }
+    guard !isCancelled() else { throw DesktopFailure(code: "cancelled") }
+    defer { releaseInput(); frames.removeAll(); elements.removeAll() }
     if operation == "move" || operation == "click" {
         guard let x = request["x"] as? Double, let y = request["y"] as? Double, x.isFinite, y.isFinite, x >= 0, y >= 0, x < frame.bounds.width, y < frame.bounds.height else { throw DesktopFailure(code: "unsupported") }
         let point = CGPoint(x: frame.bounds.minX + x, y: frame.bounds.minY + y)
@@ -292,11 +323,33 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { throw DesktopFailure(code: "failed") }
         values.withUnsafeBufferPointer { buffer in event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress) }
         event.post(tap: .cghidEventTap)
+        guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { throw DesktopFailure(code: "failed") }
+        values.withUnsafeBufferPointer { buffer in up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress) }
+        up.post(tap: .cghidEventTap)
     } else { throw DesktopFailure(code: "unsupported") }
-    let deadline = Date().addingTimeInterval(Double(duration) / 1000)
+    let cameraX = operation == "keys" ? request["dx"] as? Int ?? 0 : 0
+    let cameraY = operation == "keys" ? request["dy"] as? Int ?? 0 : 0
+    guard abs(cameraX) <= 2000 && abs(cameraY) <= 2000 else { throw DesktopFailure(code: "unsupported") }
+    let started = Date()
+    let deadline = started.addingTimeInterval(Double(duration) / 1000)
+    var movedX = 0
+    var movedY = 0
     while Date() < deadline {
         guard !isCancelled() else { throw DesktopFailure(code: "cancelled") }
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid, try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "focus") }
+        guard focused(ref), try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "focus") }
+        if cameraX != 0 || cameraY != 0 {
+            let progress = min(1.0, Date().timeIntervalSince(started) / max(0.001, Double(duration) / 1000))
+            let nextX = Int(Double(cameraX) * progress)
+            let nextY = Int(Double(cameraY) * progress)
+            let current = CGEvent(source: nil)?.location ?? frame.bounds.origin
+            let point = CGPoint(x: min(max(current.x + Double(nextX - movedX), frame.bounds.minX), frame.bounds.maxX - 1), y: min(max(current.y + Double(nextY - movedY), frame.bounds.minY), frame.bounds.maxY - 1))
+            if let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+                move.setIntegerValueField(.mouseEventDeltaX, value: Int64(nextX - movedX))
+                move.setIntegerValueField(.mouseEventDeltaY, value: Int64(nextY - movedY))
+                move.post(tap: .cghidEventTap)
+            }
+            movedX = nextX; movedY = nextY
+        }
         Thread.sleep(forTimeInterval: 0.01)
     }
     return ["performed": operation, "released": true, "verified": false]
@@ -311,6 +364,9 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     if action == "stop" { releaseInput(); frames.removeAll(); return ["stopped": true] }
     guard AXIsProcessTrusted() else { throw DesktopFailure(code: "permission") }
     switch action {
+    case "window_info":
+        let ref = try window(request["windowId"] as? String ?? "")
+        return windowMetadata(ref)
     case "take_screenshot": return try screenshot(request)
     case "input": return try input(request)
     case "launch_app":
@@ -339,15 +395,21 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     }
 }
 
-if CommandLine.arguments.contains("--permissions") {
+var inputStat = stat()
+let hasInputPipe = fstat(STDIN_FILENO, &inputStat) == 0 && (inputStat.st_mode & S_IFMT == S_IFIFO || inputStat.st_mode & S_IFMT == S_IFSOCK || inputStat.st_mode & S_IFMT == S_IFREG)
+if CommandLine.arguments.contains("--permissions") || !hasInputPipe && isatty(STDIN_FILENO) == 0 {
     let locale = Locale.preferredLanguages.first ?? "en"
     let title = "Arara Desktop"
-    let message = locale.hasPrefix("pt") ? "Antes de continuar, mova Arara Desktop para Aplicativos. Em Privacidade e Segurança, permita Acessibilidade para Arara Desktop; captura de janela exige Gravação da Tela. Não usamos áudio. Se a permissão estiver ativa e continuar falhando após atualização, remova a entrada antiga de Arara Desktop e adicione o app de Aplicativos novamente. Confira também Arara Code quando o macOS atribuir a solicitação ao host. Reabra os apps depois. Permissões de áudio ou de ignorar o seletor privado não são necessárias para este helper." : locale.hasPrefix("es") ? "Antes de continuar, mueve Arara Desktop a Aplicaciones. En Privacidad y seguridad, permite Accesibilidad para Arara Desktop; la captura requiere Grabación de pantalla. No usamos audio. Si el permiso está activo pero falla tras actualizar, elimina la entrada antigua y añade la app de Aplicaciones de nuevo. Comprueba Arara Code si macOS atribuye la solicitud al host. Vuelve a abrir las apps. No se necesita audio ni omitir el selector privado." : "Before continuing, move Arara Desktop to Applications. In Privacy & Security, allow Accessibility for Arara Desktop; window capture requires Screen Recording. Audio is not used. If access is enabled but fails after an update, remove the old Arara Desktop entry and add the app from Applications again. Also check Arara Code when macOS attributes the request to the host. Reopen the apps afterwards. Audio and bypassing the private window picker are not required by this helper."
+    let language = locale.hasPrefix("pt") ? "pt" : locale.hasPrefix("es") ? "es" : "en"
+    let resources = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/locales")
+    let data = try! Data(contentsOf: resources.appendingPathComponent("\(language).json"))
+    let catalog = try! JSONSerialization.jsonObject(with: data) as! [String: String]
+    let message = catalog["setup.detail"]!
     let alert = NSAlert()
     alert.messageText = title
     alert.informativeText = message
-    alert.addButton(withTitle: locale.hasPrefix("pt") ? "Continuar" : locale.hasPrefix("es") ? "Continuar" : "Continue")
-    alert.addButton(withTitle: locale.hasPrefix("pt") ? "Cancelar" : locale.hasPrefix("es") ? "Cancelar" : "Cancel")
+    alert.addButton(withTitle: catalog["setup.continue"]!)
+    alert.addButton(withTitle: catalog["setup.cancel"]!)
     NSApplication.shared.activate(ignoringOtherApps: true)
     if alert.runModal() == .alertFirstButtonReturn {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: Bundle.main.bundlePath)])
@@ -368,14 +430,24 @@ interrupt.resume()
 let requests = OperationQueue()
 requests.maxConcurrentOperationCount = 1
 
+_ = NSApplication.shared
+_ = NSWorkspace.shared
+DispatchQueue.global(qos: .userInitiated).async {
 while let line = readLine() {
     guard let data = line.data(using: .utf8), let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
     if request["action"] as? String == "stop" { cancelInput() }
+    cancellation.lock()
+    let generation = cancellationGeneration
+    cancellation.unlock()
     requests.addOperation {
       autoreleasepool {
         var reply: [String: Any]
         do {
             guard line.utf8.count <= 64000, let data = line.data(using: .utf8), let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw DesktopFailure(code: "unsupported") }
+            cancellation.lock()
+            let currentGeneration = cancellationGeneration
+            cancellation.unlock()
+            if currentGeneration != generation && !["status", "stop"].contains(request["action"] as? String ?? "") { throw DesktopFailure(code: "cancelled") }
             reply = ["version": 1, "result": try execute(request)]
         } catch let error as DesktopFailure {
             reply = ["version": 1, "error": error.code]
@@ -389,3 +461,6 @@ while let line = readLine() {
 cancelInput()
 requests.waitUntilAllOperationsAreFinished()
 releaseInput()
+DispatchQueue.main.async { exit(0) }
+}
+RunLoop.main.run()

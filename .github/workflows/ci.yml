@@ -3,6 +3,11 @@ on:
   push:
     branches: [main, development]
   workflow_dispatch:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        description: Publish a verified stable package from main
 permissions:
   contents: read
 jobs:
@@ -10,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        os: [macos-latest, macos-15-intel, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -21,12 +26,12 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
         if: runner.os == 'Windows'
         with:
           dotnet-version: '10.0.x'
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxtst-dev zlib1g-dev xvfb openbox libatspi2.0-0 dbus-x11
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxtst-dev zlib1g-dev xvfb openbox libatspi2.0-0 dbus-x11 libgtk-3-dev at-spi2-core libatk-adaptor
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm run lint
@@ -34,10 +39,44 @@ jobs:
       - run: npm run check:i18n
       - run: npm run build
       - run: npm run test:native -- --status
+      - if: runner.os == 'Windows'
+        run: node scripts/test-fixture.mjs
       - if: runner.os == 'Linux'
-        run: dbus-run-session -- xvfb-run -a node scripts/test-native.mjs
+        run: dbus-run-session -- xvfb-run -a node scripts/test-fixture.mjs
+      - if: runner.os == 'Linux'
+        run: dbus-run-session -- xvfb-run -a node scripts/test-fixture.mjs --accessible
+      - run: node scripts/package.mjs
+      - run: node scripts/test-package.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-${{ runner.os }}-${{ runner.arch }}
-          path: dist/
+          path: packages/
           retention-days: 14
+  release:
+    needs: native
+    if: github.ref == 'refs/heads/main' && inputs.publish == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: artifacts
+      - name: Collect verified packages
+        shell: bash
+        run: |
+          mkdir release
+          find artifacts -name '*.tar.gz' -exec cp {} release/ \;
+          find artifacts -name SHA256SUMS -exec cat {} \; > release/SHA256SUMS
+          cd release
+          sha256sum -c SHA256SUMS
+      - name: Publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          gh release create "v$version" release/* --target "${{ github.sha }}" --title "Arara Desktop $version" --notes-file README.md

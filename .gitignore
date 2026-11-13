@@ -4,3 +4,4 @@ dist/
 native/windows/bin/
 native/windows/obj/
 .DS_Store
+packages/
