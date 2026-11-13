@@ -46,6 +46,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: dbus-run-session -- xvfb-run -a node scripts/test-fixture.mjs --accessible
       - run: node scripts/package.mjs
+      - run: node scripts/test-package.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-${{ runner.os }}-${{ runner.arch }}

@@ -22,7 +22,7 @@ if (process.platform === 'darwin') {
   run('xcrun', ['swiftc', '-O', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx13.0`, 'native/macos/main.swift', '-o', executable]);
   run('codesign', ['--force', '--sign', process.env.ARARA_DESKTOP_SIGN_IDENTITY || '-', '--identifier', 'br.app.code.arara.desktop', bundle]);
 } else if (process.platform === 'win32') {
-  run('dotnet', ['publish', 'native/windows/AraraDesktop.csproj', '-c', 'Release', '-r', `win-${process.arch}`, '--self-contained', 'true', '-p:PublishSingleFile=true', '-o', output]);
+  run('dotnet', ['publish', 'native/windows/AraraDesktop.csproj', '-c', 'Release', '-r', `win-${process.arch}`, '--self-contained', 'true', '-p:PublishSingleFile=true', '-p:IncludeNativeLibrariesForSelfExtract=true', '-o', output]);
 } else if (process.platform === 'linux') {
   run('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', 'native/linux/main.c', '-lX11', '-lXtst', '-ldl', '-lz', '-pthread', '-o', join(output, 'arara-desktop')]);
 } else throw new Error('Unsupported platform');
