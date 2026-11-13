@@ -37,6 +37,7 @@ const call = request => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error(`Timeout: ${request.action}`)), 12000);
   pending.push(reply => { clearTimeout(timer); resolve(reply); }); native.stdin.write(`${JSON.stringify({ version: 1, ...request })}\n`);
 });
+console.log(`Native fixture starting (${process.platform})`);
 const ok = reply => { assert.equal(reply.error, undefined, JSON.stringify(reply)); return reply.result; };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
@@ -48,6 +49,7 @@ try {
   readEvents();
   assert.equal(windows.length, 1, `Isolated fixture window must be present; exit=${fixture.exitCode} events=${JSON.stringify(events)}`);
   fixturePid = windows[0].processId;
+  console.log('PASS isolated fixture window found');
   const windowId = windows[0].windowId;
   ok(await call({ action: 'focus_window', windowId })); await sleep(300);
   const snapshot = ok(await call({ action: 'take_snapshot', windowId }));
@@ -62,10 +64,12 @@ try {
     const result = ok(await call({ action: 'take_snapshot', windowId }));
     assert.ok(result.nodes.some(node => String(node.value ?? node.name).includes('Applied: Isolated test')));
   }
+  console.log('PASS native semantic flow');
   const frame = ok(await call({ action: 'take_screenshot', windowId }));
   assert.equal(Buffer.from(frame.images[0].data, 'base64').subarray(1, 4).toString(), 'PNG');
   ok(await call({ action: 'input', windowId, frameId: frame.frameId, operation: 'click', x: Math.round(frame.coordinateWidth * 0.6), y: Math.round(frame.coordinateHeight * 0.8), durationMs: 300 }));
   await sleep(100);
+  console.log('PASS native mouse hold completed');
   readEvents();
   const down = events.find(event => event.kind === 'mouse_down'); const up = events.find(event => event.kind === 'mouse_up');
   assert.ok(down && up && up.at - down.at >= 0.25, JSON.stringify(events));
@@ -80,7 +84,9 @@ try {
   console.log(`PASS real ${process.platform}: isolated accessibility, screenshot, canvas click hold, consumed frame rejection, keyboard hold cancellation and key release`);
 } finally {
   if (fixturePid) { try { process.kill(fixturePid); } catch {} }
-  fixture.kill(); native.stdin.end(); manager?.kill(); lines.close(); eventLines.close();
+  if (process.platform === 'win32' && fixture.pid) spawnSync('taskkill', ['/PID', String(fixture.pid), '/T', '/F'], { stdio: 'ignore' });
+  else fixture.kill();
+  native.stdin.end(); manager?.kill(); lines.close(); eventLines.close(); fixture.stdout.destroy(); native.stdout.destroy();
   await sleep(100); native.kill();
   rmSync(scratch, { recursive: true, force: true });
   process.chdir(root);

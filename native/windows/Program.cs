@@ -278,11 +278,27 @@ internal static class Program
                     break;
                 default: throw new DesktopFailure("unsupported");
             }
+            var cameraX = operation == "keys" ? Number(request, "dx") : 0;
+            var cameraY = operation == "keys" ? Number(request, "dy") : 0;
+            if (Math.Abs((long)cameraX) > 2000 || Math.Abs((long)cameraY) > 2000) throw new DesktopFailure("unsupported");
             var watch = Stopwatch.StartNew();
-            while (watch.ElapsedMilliseconds < duration) { if (Cancellation.IsCancellationRequested) throw new DesktopFailure("cancelled"); FocusCheck(target); if (Bounds(target) != frame.Bounds) throw new DesktopFailure("stale"); Thread.Sleep(10); }
+            var movedX = 0; var movedY = 0;
+            while (watch.ElapsedMilliseconds < duration)
+            {
+                if (Cancellation.IsCancellationRequested) throw new DesktopFailure("cancelled");
+                FocusCheck(target); if (Bounds(target) != frame.Bounds) throw new DesktopFailure("stale");
+                if (cameraX != 0 || cameraY != 0)
+                {
+                    var progress = Math.Min(1.0, watch.ElapsedMilliseconds / (double)Math.Max(1, duration));
+                    var nextX = (int)(cameraX * progress); var nextY = (int)(cameraY * progress);
+                    Send(new INPUT { Data = new InputUnion { Mouse = new MOUSEINPUT { X = nextX - movedX, Y = nextY - movedY, Flags = 1 } } });
+                    movedX = nextX; movedY = nextY;
+                }
+                Thread.Sleep(10);
+            }
             return new { performed = operation, released = true, verified = false };
         }
-        finally { ReleaseInput(); Frames.Clear(); }
+        finally { ReleaseInput(); Frames.Clear(); Nodes.Clear(); }
     }
     private static object Execute(JsonElement request)
     {

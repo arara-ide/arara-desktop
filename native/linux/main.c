@@ -654,6 +654,13 @@ static const char *input(Json request, int index) {
   } else
     return "unsupported";
   XFlush(display);
+  int camera_x = !strcmp(operation, "keys") ? number(request, "dx", 0) : 0;
+  int camera_y = !strcmp(operation, "keys") ? number(request, "dy", 0) : 0;
+  int moved_x = 0, moved_y = 0;
+  if (labs((long)camera_x) > 2000 || labs((long)camera_y) > 2000) {
+    release_input();
+    return "unsupported";
+  }
   for (int elapsed = 0; elapsed < duration && !error; elapsed += 10) {
     Rectangle current;
     if (cancelled)
@@ -662,10 +669,20 @@ static const char *input(Json request, int index) {
              !bounds(windows[index].handle, &current) ||
              !same_bounds(current, box))
       error = "focus";
+    if (!error && (camera_x || camera_y)) {
+      int next_x = camera_x * elapsed / duration,
+          next_y = camera_y * elapsed / duration;
+      XTestFakeRelativeMotionEvent(display, next_x - moved_x, next_y - moved_y,
+                                   CurrentTime);
+      XFlush(display);
+      moved_x = next_x;
+      moved_y = next_y;
+    }
     struct timespec delay = {0, 10000000};
     nanosleep(&delay, NULL);
   }
   release_input();
+  clear_nodes();
   frame_window = -1;
   if (error)
     return error;

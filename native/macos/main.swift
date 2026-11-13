@@ -249,7 +249,7 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
     let duration = request["durationMs"] as? Int ?? 0
     guard duration >= 0 && duration <= 5000 else { throw DesktopFailure(code: "unsupported") }
     beginInput()
-    defer { releaseInput(); frames.removeAll() }
+    defer { releaseInput(); frames.removeAll(); elements.removeAll() }
     if operation == "move" || operation == "click" {
         guard let x = request["x"] as? Double, let y = request["y"] as? Double, x.isFinite, y.isFinite, x >= 0, y >= 0, x < frame.bounds.width, y < frame.bounds.height else { throw DesktopFailure(code: "unsupported") }
         let point = CGPoint(x: frame.bounds.minX + x, y: frame.bounds.minY + y)
@@ -289,10 +289,29 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
         values.withUnsafeBufferPointer { buffer in up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress) }
         up.post(tap: .cghidEventTap)
     } else { throw DesktopFailure(code: "unsupported") }
-    let deadline = Date().addingTimeInterval(Double(duration) / 1000)
+    let cameraX = operation == "keys" ? request["dx"] as? Int ?? 0 : 0
+    let cameraY = operation == "keys" ? request["dy"] as? Int ?? 0 : 0
+    guard abs(cameraX) <= 2000 && abs(cameraY) <= 2000 else { throw DesktopFailure(code: "unsupported") }
+    let started = Date()
+    let deadline = started.addingTimeInterval(Double(duration) / 1000)
+    var movedX = 0
+    var movedY = 0
     while Date() < deadline {
         guard !isCancelled() else { throw DesktopFailure(code: "cancelled") }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ref.pid, try bounds(ref) == frame.bounds else { throw DesktopFailure(code: "focus") }
+        if cameraX != 0 || cameraY != 0 {
+            let progress = min(1.0, Date().timeIntervalSince(started) / max(0.001, Double(duration) / 1000))
+            let nextX = Int(Double(cameraX) * progress)
+            let nextY = Int(Double(cameraY) * progress)
+            let current = CGEvent(source: nil)?.location ?? frame.bounds.origin
+            let point = CGPoint(x: min(max(current.x + Double(nextX - movedX), frame.bounds.minX), frame.bounds.maxX - 1), y: min(max(current.y + Double(nextY - movedY), frame.bounds.minY), frame.bounds.maxY - 1))
+            if let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+                move.setIntegerValueField(.mouseEventDeltaX, value: Int64(nextX - movedX))
+                move.setIntegerValueField(.mouseEventDeltaY, value: Int64(nextY - movedY))
+                move.post(tap: .cghidEventTap)
+            }
+            movedX = nextX; movedY = nextY
+        }
         Thread.sleep(forTimeInterval: 0.01)
     }
     return ["performed": operation, "released": true, "verified": false]
