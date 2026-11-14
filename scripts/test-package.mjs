@@ -41,4 +41,4 @@ try {
   assert.equal(response.result.platform, process.platform);
   assert.equal(response.result.audio, false);
   console.log(`PASS extracted ${process.platform}/${process.arch} package metadata and embedded application version match package.json`);
-} finally { rmSync(directory, { recursive: true, force: true }); }
+} finally { rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); }
