@@ -13,7 +13,7 @@ export function browserCursorDirectory() {
 export function copyBrowserCursor(destination) {
   const directory = browserCursorDirectory();
   const source = readFileSync(join(directory, 'extension/cursor.js'), 'utf8');
-  if (!source.includes('globalThis.AraraCursor =') || !source.includes('moveTo')) throw new Error('Unsupported Arara Browser cursor contract');
+  if (!source.includes('globalThis.AraraCursor =') || !source.includes('moveTo') || !source.includes('externalClock') || !source.includes('tick:')) throw new Error('Unsupported Arara Browser cursor contract');
   cpSync(join(directory, 'extension/cursor.js'), join(destination, 'browser-cursor.js'));
   cpSync(join(directory, 'LICENSE'), join(destination, 'browser-cursor-LICENSE'));
 }

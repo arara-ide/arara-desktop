@@ -480,7 +480,9 @@ func execute(_ request: [String: Any]) throws -> [String: Any] {
     let action = request["action"] as? String ?? ""
     if action == "status" {
         let locked = sessionLocked()
-        return ["appVersion": appVersion, "platform": "darwin", "accessibility": AXIsProcessTrusted(), "actions": ["list_windows", "focus_window", "take_snapshot", "read", "act", "take_screenshot", "input", "launch_app", "stop"], "screenshots": CGPreflightScreenCaptureAccess(), "input": AXIsProcessTrusted() && !locked, "sessionLocked": locked, "audio": false]
+        var status: [String: Any] = ["appVersion": appVersion, "platform": "darwin", "accessibility": AXIsProcessTrusted(), "actions": ["list_windows", "focus_window", "take_snapshot", "read", "act", "take_screenshot", "input", "launch_app", "stop"], "screenshots": CGPreflightScreenCaptureAccess(), "input": AXIsProcessTrusted() && !locked, "sessionLocked": locked, "audio": false]
+        if let url = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://example.com")!), let identifier = Bundle(url: url)?.bundleIdentifier { status["defaultBrowser"] = identifier }
+        return status
     }
     if action == "stop" { releaseInput(); frames.removeAll(); DesktopFeedback.shared.stop(); return ["stopped": true] }
     if ["input", "act", "focus_window"].contains(action) && sessionLocked() { throw DesktopFailure(code: "session_locked") }
