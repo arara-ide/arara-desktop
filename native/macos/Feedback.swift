@@ -13,6 +13,7 @@ final class DesktopFeedback: NSObject, WKNavigationDelegate {
     private var loaded = false
     private var pending: (() -> Void)?
     private var idle: Timer?
+    private var clock: Timer?
     private var target: pid_t?
     private var revision = 0
     private var origin = CGPoint.zero
@@ -64,9 +65,16 @@ final class DesktopFeedback: NSObject, WKNavigationDelegate {
             self.panel?.orderFrontRegardless()
             self.idle?.invalidate()
             self.idle = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { _ in self.hide() }
+            self.clock?.invalidate()
+            self.clock = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
+                self.view?.evaluateJavaScript("globalThis.AraraCursor?.tick()")
+            }
             let run = {
                 guard self.revision == revision else { finished.signal(); return }
-                self.view?.callAsyncJavaScript("AraraCursor.render({active:true}); await AraraCursor.moveTo(x,y); if(click) await AraraCursor.press();", arguments: ["x": point.x - self.origin.x, "y": point.y - self.origin.y, "click": click], in: nil, in: .page) { _ in finished.signal() }
+                self.view?.callAsyncJavaScript("AraraCursor.render({active:true,externalClock:true}); await AraraCursor.moveTo(x,y); if(click) await AraraCursor.press();", arguments: ["x": point.x - self.origin.x, "y": point.y - self.origin.y, "click": click], in: nil, in: .page) { _ in
+                    if self.revision == revision { self.clock?.invalidate(); self.clock = nil }
+                    finished.signal()
+                }
             }
             if self.loaded { run() } else { self.pending = run }
         }
@@ -80,6 +88,8 @@ final class DesktopFeedback: NSObject, WKNavigationDelegate {
         pending = nil
         idle?.invalidate()
         idle = nil
+        clock?.invalidate()
+        clock = nil
         target = nil
         let revision = revision
         NSAnimationContext.runAnimationGroup { context in

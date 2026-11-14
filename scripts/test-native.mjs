@@ -22,6 +22,7 @@ try {
   assert.equal(status.result.platform, process.platform);
   assert.equal(status.result.audio, false);
   assert.equal(typeof status.result.accessibility, 'boolean');
+  if (process.platform === 'darwin' && status.result.defaultBrowser !== undefined) assert.match(status.result.defaultBrowser, /^[A-Za-z0-9.-]+$/);
   if (status.result.sessionLocked === true) {
     assert.equal(status.result.input, false);
     assert.equal((await call({ action: 'focus_window', windowId: 'missing' })).error, 'session_locked');

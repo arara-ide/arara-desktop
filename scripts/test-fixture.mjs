@@ -10,7 +10,7 @@ const root = resolve('.');
 const accessible = process.argv.includes('--accessible');
 const canvas = process.argv.includes('--canvas');
 const scratch = mkdtempSync(join(tmpdir(), 'arara-desktop-fixture-'));
-const binary = process.platform === 'darwin' ? resolve('dist/Arara Desktop.app/Contents/MacOS/arara-desktop') : resolve(`dist/arara-desktop${process.platform === 'win32' ? '.exe' : ''}`);
+const binary = process.env.ARARA_DESKTOP_EXECUTABLE ?? (process.platform === 'darwin' ? resolve('dist/Arara Desktop.app/Contents/MacOS/arara-desktop') : resolve(`dist/arara-desktop${process.platform === 'win32' ? '.exe' : ''}`));
 const probe = spawnSync(binary, [], { input: JSON.stringify({ version: 1, action: 'status' }) + '\n', encoding: 'utf8', timeout: 12000 });
 assert.equal(probe.status, 0, probe.stderr);
 const capabilities = JSON.parse(probe.stdout.trim()).result;
@@ -27,7 +27,7 @@ if (process.platform === 'darwin') {
   writeFileSync(join(app, 'Contents/Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${application}</string><key>CFBundleExecutable</key><string>fixture</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>`);
   run('xcrun', ['swiftc', 'native/macos/fixture.swift', '-o', fixtureBinary]);
   run('codesign', ['--force', '--sign', '-', app]);
-  if (canvas) { feedbackProbe = join(scratch, 'feedback-probe'); run('xcrun', ['swiftc', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx13.0`, 'native/macos/feedback-probe.swift', '-o', feedbackProbe]); }
+  if (canvas) { feedbackProbe = join(scratch, 'feedback-probe'); run('xcrun', ['swiftc', '-O', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx13.0`, 'native/macos/feedback-probe.swift', '-o', feedbackProbe]); }
 } else if (process.platform === 'win32') { fixtureBinary = binary; fixtureArgs = ['--fixture']; }
 else {
   fixtureBinary = join(scratch, 'fixture');
@@ -95,6 +95,15 @@ try {
     assert.equal(visibleFeedback(), 1, 'The real native cursor overlay must be visible after a click');
     const cursorPixels = Number(spawnSync(feedbackProbe, [String(native.pid), '--ink'], { encoding: 'utf8' }).stdout.trim());
     assert.ok(cursorPixels > 20 && cursorPixels < 10000, `The transparent overlay must render the original cursor pixels: ${cursorPixels}`);
+    const motionFrame = ok(await call({ action: 'take_screenshot', windowId }));
+    const movement = call({ action: 'input', windowId, frameId: motionFrame.frameId, operation: 'move', x: 10, y: 10 });
+    const positions = [];
+    for (let sample = 0; sample < 4; sample++) {
+      await sleep(70);
+      positions.push(spawnSync(feedbackProbe, [String(native.pid), '--position'], { encoding: 'utf8' }).stdout.trim());
+    }
+    ok(await movement);
+    assert.ok(new Set(positions).size > 1, `The cursor must draw intermediate movement frames: ${positions}`);
     const scrollFrame = ok(await call({ action: 'take_screenshot', windowId }));
     ok(await call({ action: 'input', windowId, frameId: scrollFrame.frameId, operation: 'scroll', dy: 120 }));
     await sleep(200); readEvents();
