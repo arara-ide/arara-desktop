@@ -6,7 +6,15 @@ Adapter local de acessibilidade e entrada para macOS, Windows e Linux. Comunica�
 
 ## Desenvolvimento
 
-Node 22/24 para as verificações; Xcode no macOS, .NET 10 no Windows e compilador C com X11/XTest no Linux. Acessibilidade Linux usa AT-SPI quando disponível, inclusive em sessões Wayland. O fallback visual de Linux está implementado para X11. Em Wayland, o adapter anuncia input/captura indisponíveis; uma sessão de portal compatível ainda precisa ser implementada; indisponibilidade é anunciada explicitamente, sem usar XWayland para contornar o isolamento.
+Node 22/24 para as verificações; Xcode no macOS, .NET 10 no Windows e compilador C com headers X11/XTest, GIO e libei no Linux. X11 conserva entrada por XTest e captura da janela. Wayland usa AT-SPI para interfaces semânticas, o portal Screenshot para capturar todo o desktop e RemoteDesktop/libei para entrada. Não usa ScreenCast, não pede seleção de monitor e não captura áudio.
+
+O helper Wayland executa em um escopo de aplicativo do systemd do usuário, com identidade `br.app.code.arara.Desktop`. Isso permite atribuir as permissões ao aplicativo correto. `setup` registra sua entrada gerenciada no menu e mostra uma janela própria para os diálogos nativos de captura e controle. A pessoa confirma as permissões; nenhuma confirmação é automatizada. A captura autorizada é reutilizada em segundo plano, sem seletor de tela. A sessão de controle dura enquanto o helper permanecer aberto; `stop` e EOF liberam entrada e encerram os pedidos. Uma recusa não inicia outra tentativa automática.
+
+`status` não solicita permissões. `permissionPending: true` indica um diálogo pendente; consulte `status` após a resposta, sem reiniciar o helper. O laço de eventos continua ativo entre chamadas, inclusive durante a espera de autorização. Captura indisponível ou compositor incompatível continua sendo informado explicitamente.
+
+`list_windows` inclui uma superfície `screen` por monitor, com origem e dimensões lógicas. A captura inteira é recortada para o alvo respeitando posição, escala e espaços entre telas; coordenadas negativas também são válidas. O ponteiro usa coordenadas absolutas do compositor por libei. A origem `(0, 0)` fornecida por alguns aplicativos AT-SPI não é usada para presumir a posição de uma janela Wayland. Um frame visual recente é necessário para ponteiro e valida geometria; quando a acessibilidade identifica a janela em foco, sua mudança interrompe a entrada. Aplicativos sem essa informação usam a superfície do desktop e exigem conferir o resultado pela próxima observação.
+
+`launch_app` usa o desktop entry instalado, independentemente da permissão de entrada. O aplicativo tem descritores separados do protocolo, sem execução de shell.
 
 O build macOS reutiliza o cursor original do Arara Browser, incluindo sua licença. Prepare um checkout público de `arara-ide/arara-browser` na mesma branch, ao lado deste repositório ou em `.work/arara-browser`; `ARARA_BROWSER_SOURCE` aceita outro caminho. Não há cópia editável do cursor neste repositório.
 
