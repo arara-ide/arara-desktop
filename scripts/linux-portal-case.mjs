@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { once } from 'node:events';
 
 const [fixture, binary, mode] = process.argv.slice(2);
 const scratch = mkdtempSync(join(tmpdir(), 'arara-portal-'));
@@ -22,6 +23,14 @@ writeFileSync(join(scratch, 'applications', `${application}.desktop`), `[Desktop
 let native;
 let lines;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const waitForLog = async (expected, initial) => {
+  const signal = AbortSignal.timeout(5000);
+  try {
+    while (!logs.includes(expected)) await once(serverLines, 'line', { signal });
+  } catch {
+    assert.fail(`Missing portal event ${expected}; initial=${JSON.stringify(initial)}; nativeExit=${native?.exitCode}; events=${JSON.stringify(logs)}`);
+  }
+};
 try {
   await ready;
   native = spawn(binary, [], { env: { ...process.env, WAYLAND_DISPLAY: 'isolated-wayland', DISPLAY: '', XDG_DATA_HOME: scratch, ARARA_LAUNCH_RECEIPT: join(scratch, 'receipt') }, stdio: ['pipe', 'pipe', 'inherit'] });
@@ -33,6 +42,15 @@ try {
     pending.push(result => { clearTimeout(timer); resolve(result); });
     native.stdin.write(`${JSON.stringify({ version: 1, ...request })}\n`);
   });
+  const settledStatus = async () => {
+    const deadline = performance.now() + 5000;
+    do {
+      const status = (await call({ action: 'status' })).result;
+      if (!status.permissionPending) return status;
+      await sleep(10);
+    } while (performance.now() < deadline);
+    assert.fail(`Portal did not settle; events=${JSON.stringify(logs)}`);
+  };
   const before = (await call({ action: 'status' })).result;
   assert.equal(before.portalAvailable, true);
   assert.equal(before.portalRequired, true);
@@ -45,13 +63,11 @@ try {
   const settingUp = call({ action: 'setup' });
   const initial = await settingUp;
   if (!['empty', 'invalid'].includes(mode)) {
-    for (let i = 0; i < 100 && !logs.includes('METHOD Start'); i++) await sleep(10);
+    await waitForLog('RESPONSE Screenshot', initial);
+    await waitForLog('METHOD Start', initial);
     assert.ok(logs.includes('METHOD Start'), 'The native event loop must keep progressing while no tool request is running');
   }
-  let observed = (await call({ action: 'status' })).result;
-  for (let i = 0; i < 100 && observed.permissionPending && mode !== 'pending' && mode !== 'delayed'; i++) {
-    await sleep(10); observed = (await call({ action: 'status' })).result;
-  }
+  if (mode !== 'pending' && mode !== 'delayed') await settledStatus();
   if (mode === 'pending') {
     assert.equal(initial.result.permissionPending, true);
     assert.equal((await call({ action: 'status' })).result.permissionPending, true);
@@ -59,15 +75,15 @@ try {
     assert.equal((await call({ action: 'setup' })).result.permissionPending, true);
     assert.equal(logs.filter(line => line === 'METHOD Start').length, count);
     assert.equal((await call({ action: 'stop' })).result.stopped, true);
-    assert.ok(logs.includes('METHOD Close'));
+    await waitForLog('METHOD Close', initial);
   } else if (mode === 'delayed') {
     assert.equal(initial.result.permissionPending, true);
-    await sleep(1800);
-    const status = (await call({ action: 'status' })).result;
+    await waitForLog('RESPONSE Start', initial);
+    const status = await settledStatus();
     assert.equal(status.input, true);
     assert.equal(status.permissionPending, false);
     assert.equal(logs.filter(line => line === 'METHOD Start').length, 1);
-  } else if (mode === 'ready') {
+  } else if (mode === 'ready' || mode === 'slow-ready') {
     assert.equal(initial.error, undefined);
     const status = (await call({ action: 'status' })).result;
     assert.equal(status.input, true);
@@ -93,9 +109,18 @@ try {
   assert.ok(!logs.includes('METHOD SelectSources'), 'Never ask the person to select a monitor');
   console.log(`PASS isolated Wayland portal ${mode}, application launch and protocol isolation`);
 } finally {
-  native?.stdin.end();
-  native?.kill();
-  server.kill();
+  if (native && native.exitCode === null && native.signalCode === null) {
+    const closed = once(native, 'close');
+    const timer = setTimeout(() => native.kill('SIGKILL'), 1500);
+    native.stdin.end();
+    await closed;
+    clearTimeout(timer);
+  }
+  if (server.exitCode === null && server.signalCode === null) {
+    const closed = once(server, 'close');
+    server.kill();
+    await closed;
+  }
   lines?.close();
   serverLines.close();
   rmSync(scratch, { recursive: true, force: true });

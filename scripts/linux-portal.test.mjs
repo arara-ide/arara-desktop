@@ -19,7 +19,7 @@ beforeAll(() => {
   expect(compiled.status, compiled.stderr).toBe(0);
 });
 afterAll(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
-it.runIf(linux).each(['ready', 'denied', 'partial', 'empty', 'invalid', 'pending', 'delayed'])('handles the isolated Wayland portal: %s', mode => {
+it.runIf(linux).each(['ready', 'slow-ready', 'denied', 'partial', 'empty', 'invalid', 'pending', 'delayed'])('handles the isolated Wayland portal: %s', mode => {
   const result = spawnSync('dbus-run-session', ['--', process.execPath, 'scripts/linux-portal-case.mjs', fixture, resolve('dist/arara-desktop'), mode], { encoding: 'utf8', timeout: 15000 });
   expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
   expect(result.stdout).toContain(`PASS isolated Wayland portal ${mode}`);

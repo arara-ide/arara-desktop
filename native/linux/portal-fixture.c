@@ -46,6 +46,7 @@ typedef struct {
   GDBusConnection *connection;
   char *sender;
   char *path;
+  char *method;
   GVariant *parameters;
 } DelayedResponse;
 
@@ -53,10 +54,13 @@ static gboolean delayed_response(gpointer data) {
   DelayedResponse *reply = data;
   g_dbus_connection_emit_signal(reply->connection, reply->sender, reply->path,
       "org.freedesktop.portal.Request", "Response", reply->parameters, NULL);
+  printf("RESPONSE %s\n", reply->method);
+  fflush(stdout);
   g_object_unref(reply->connection);
   g_variant_unref(reply->parameters);
   g_free(reply->sender);
   g_free(reply->path);
+  g_free(reply->method);
   g_free(reply);
   return G_SOURCE_REMOVE;
 }
@@ -127,19 +131,24 @@ static void method(GDBusConnection *connection, const gchar *sender,
   }
   if (!strcmp(mode, "pending") && !strcmp(name, "Start"))
     g_variant_builder_clear(&results);
-  else if (!strcmp(mode, "delayed") && !strcmp(name, "Start")) {
+  else if ((!strcmp(mode, "delayed") && !strcmp(name, "Start")) ||
+           (!strcmp(mode, "slow-ready") && !strcmp(name, "Screenshot"))) {
     DelayedResponse *reply = g_new0(DelayedResponse, 1);
     reply->connection = g_object_ref(connection);
     reply->sender = g_strdup(sender);
     reply->path = g_strdup(request);
+    reply->method = g_strdup(name);
     reply->parameters = g_variant_ref_sink(
         g_variant_new("(u@a{sv})", response, g_variant_builder_end(&results)));
     g_timeout_add(1600, delayed_response, reply);
   }
-  else
+  else {
     g_dbus_connection_emit_signal(connection, sender, request,
         "org.freedesktop.portal.Request", "Response",
         g_variant_new("(u@a{sv})", response, g_variant_builder_end(&results)), NULL);
+    printf("RESPONSE %s\n", name);
+    fflush(stdout);
+  }
   g_free(request);
   g_free(owner);
   g_variant_unref(options);
