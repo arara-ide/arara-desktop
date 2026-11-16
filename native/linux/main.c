@@ -1,5 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 #include "json.h"
+#include "portal.h"
+#include "platform.h"
+#include <gio/gdesktopappinfo.h>
+#include <fcntl.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -16,6 +20,7 @@ typedef struct {
   unsigned long pid;
   char id[40];
   void *accessible;
+  int screen;
 } WindowRef;
 typedef struct {
   void *element;
@@ -23,9 +28,7 @@ typedef struct {
   char name[1024];
   int window;
 } NodeRef;
-typedef struct {
-  int x, y, width, height;
-} Rectangle;
+typedef PortalRectangle Rectangle;
 static Display *display;
 static WindowRef windows[100];
 static int window_count;
@@ -43,11 +46,17 @@ static int closed_input;
 static pthread_cond_t available = PTHREAD_COND_INITIALIZER;
 static char frame_id[40];
 static int frame_window = -1;
+static int visual_frame;
+static void *frame_foreground;
+static unsigned int frame_foreground_pid;
 static Rectangle frame_bounds;
 static time_t frame_time;
 static KeyCode held_keys[6];
 static int held_key_count;
 static int held_button;
+static uint32_t portal_keys[6];
+static int portal_key_count;
+static int portal_held_button;
 static void *atspi_lib;
 static void *gobject_lib;
 static void *glib_lib;
@@ -74,6 +83,7 @@ static char *(*get_text_fn)(void *, int, int, void *);
 static void *(*ref_fn)(void *);
 static void *(*state_fn)(void *);
 static int (*contains_fn)(void *, int);
+static void (*clear_cache_fn)(void *);
 static void (*unref_fn)(void *);
 static void (*free_fn)(void *);
 static void load_atspi(void) {
@@ -112,14 +122,20 @@ static void load_atspi(void) {
       dlsym(atspi_lib, "atspi_document_get_attribute_value");
   LOAD(state_fn, "atspi_accessible_get_state_set");
   LOAD(contains_fn, "atspi_state_set_contains");
+  LOAD(clear_cache_fn, "atspi_accessible_clear_cache");
   *(void **)(&unref_fn) = dlsym(gobject_lib, "g_object_unref");
   *(void **)(&free_fn) = dlsym(glib_lib, "g_free");
   *(void **)(&ref_fn) = dlsym(gobject_lib, "g_object_ref");
 #undef LOAD
   if (!ref_fn || !unref_fn || !free_fn || atspi_init_fn() != 0)
     desktop_fn = NULL;
-  else if (atspi_timeout_fn)
-    atspi_timeout_fn(250, 500);
+  else {
+    if (atspi_timeout_fn)
+      atspi_timeout_fn(250, 500);
+    void *desktop = desktop_fn(0);
+    if (desktop)
+      unref_fn(desktop);
+  }
 }
 static double monotonic_time(void) {
   struct timespec value;
@@ -161,6 +177,47 @@ static int bounds(Window handle, Rectangle *out) {
 static int same_bounds(Rectangle a, Rectangle b) {
   return a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height;
 }
+static int active(Window handle);
+static int interrupted(void) {
+  return cancelled || generation != active_generation;
+}
+static int window_bounds(int index, Rectangle *out) {
+  if (windows[index].screen) {
+    *out = portal_source_bounds(windows[index].screen - 1);
+    return out->width > 0 && out->height > 0;
+  }
+  if (display)
+    return bounds(windows[index].handle, out);
+  void *element = windows[index].accessible;
+  if (!element)
+    return 0;
+  clear_cache_fn(element);
+  void *component = component_fn(element);
+  Rectangle *box = component ? extents_fn(component, 0, NULL) : NULL;
+  int valid = box && box->width > 0 && box->height > 0 &&
+      box->width <= 16000 && box->height <= 16000 &&
+      box->x > -100000 && box->x < 100000 &&
+      box->y > -100000 && box->y < 100000;
+  if (valid)
+    *out = *box;
+  if (box)
+    free_fn(box);
+  if (component)
+    unref_fn(component);
+  return valid;
+}
+static int window_active(int index) {
+  if (windows[index].screen)
+    return portal_input_ready();
+  if (display)
+    return active(windows[index].handle);
+  clear_cache_fn(windows[index].accessible);
+  void *state = state_fn(windows[index].accessible);
+  int focused = state && contains_fn(state, 1);
+  if (state)
+    unref_fn(state);
+  return focused;
+}
 static int active(Window handle) {
   return property(DefaultRootWindow(display), "_NET_ACTIVE_WINDOW") == handle;
 }
@@ -169,7 +226,8 @@ static int select_window(Json request) {
   text(member(request, "windowId"), id, sizeof(id));
   for (int i = 0; i < window_count; i++)
     if (!strcmp(id, windows[i].id) &&
-        (windows[i].accessible
+        (windows[i].screen ? windows[i].screen <= portal_source_count() :
+         windows[i].accessible
              ? pid_fn(windows[i].accessible, NULL) == windows[i].pid
              : display && property(windows[i].handle, "_NET_WM_PID") ==
                               windows[i].pid))
@@ -191,6 +249,9 @@ static int safe_window(Window handle) {
   return safe;
 }
 static void clear_windows(void) {
+  if (frame_foreground && unref_fn)
+    unref_fn(frame_foreground);
+  frame_foreground = NULL;
   if (unref_fn)
     for (int i = 0; i < window_count; i++)
       if (windows[i].accessible) {
@@ -200,17 +261,15 @@ static void clear_windows(void) {
   window_count = 0;
 }
 static const char *accessible_windows(Json request) {
-  if (!desktop_fn)
-    return "session_unavailable";
   clear_nodes();
   clear_windows();
   frame_window = -1;
-  void *desktop = desktop_fn(0);
-  if (!desktop)
+  void *desktop = desktop_fn ? desktop_fn(0) : NULL;
+  if (!desktop && !portal_input_ready())
     return "session_unavailable";
   char selected[200];
   text(member(request, "application"), selected, sizeof(selected));
-  int count = count_fn(desktop, NULL), comma = 0;
+  int count = desktop ? count_fn(desktop, NULL) : 0, comma = 0;
   printf("{\"windows\":[");
   for (int i = 0; i < count && i < 100 && window_count < 100; i++) {
     void *app = child_fn(desktop, i, NULL);
@@ -227,11 +286,11 @@ static const char *accessible_windows(Json request) {
         continue;
       WindowRef *target = &windows[window_count++];
       target->handle = 0;
+      target->screen = 0;
       target->accessible = element;
       target->pid = pid_fn(element, NULL);
       snprintf(target->id, sizeof(target->id), "w%lu", ++sequence);
       char *title = name_fn(element, NULL);
-      void *state = state_fn(element);
       if (comma++)
         putchar(',');
       printf("{\"windowId\":");
@@ -240,18 +299,32 @@ static const char *accessible_windows(Json request) {
       quoted(name, 160);
       printf(",\"title\":");
       quoted(title, 160);
-      printf(",\"active\":%s}",
-             state && contains_fn(state, 1) ? "true" : "false");
+      printf(",\"active\":%s}", window_active(window_count - 1) ? "true" : "false");
       if (title)
         free_fn(title);
-      if (state)
-        unref_fn(state);
     }
     if (name)
       free_fn(name);
     unref_fn(app);
   }
-  unref_fn(desktop);
+  if (desktop)
+    unref_fn(desktop);
+  if (!selected[0] || !strcmp(selected, "Desktop"))
+    for (int i = 0; i < portal_source_count() && window_count < 100; i++) {
+      WindowRef *target = &windows[window_count++];
+      memset(target, 0, sizeof(*target));
+      target->screen = i + 1;
+      snprintf(target->id, sizeof(target->id), "w%lu", ++sequence);
+      Rectangle rect = portal_source_bounds(i);
+      if (comma++)
+        putchar(',');
+      printf("{\"windowId\":");
+      quoted(target->id, 40);
+      printf(",\"app\":\"Desktop\",\"title\":\"Shared screen %d\","
+          "\"surface\":\"screen\",\"active\":true,\"x\":%d,\"y\":%d,"
+          "\"width\":%d,\"height\":%d}", i + 1, rect.x, rect.y,
+          rect.width, rect.height);
+    }
   printf("],\"truncated\":%s}", window_count >= 100 ? "true" : "false");
   return NULL;
 }
@@ -286,6 +359,7 @@ static const char *list_windows(Json request) {
       if (match) {
         WindowRef *ref = &windows[window_count++];
         ref->handle = handle;
+        ref->screen = 0;
         ref->pid = pid;
         snprintf(ref->id, sizeof(ref->id), "w%lu", ++sequence);
         if (comma++)
@@ -398,6 +472,21 @@ static void document_metadata(int index) {
     unref_fn(queue[head++]);
 }
 static const char *snapshot(int index) {
+  if (windows[index].screen) {
+    Rectangle box;
+    if (!window_bounds(index, &box))
+      return "stale";
+    frame_window = index;
+    frame_bounds = box;
+    frame_time = time(NULL);
+    visual_frame = 0;
+    snprintf(frame_id, sizeof(frame_id), "f%lu", ++sequence);
+    printf("{\"nodes\":[],\"truncated\":false,\"accessibility\":false,"
+           "\"inputFrameId\":");
+    quoted(frame_id, 40);
+    printf("}");
+    return NULL;
+  }
   void *root = root_for(index);
   if (!root) {
     clear_nodes();
@@ -492,10 +581,27 @@ static const char *snapshot(int index) {
     unref_fn(queue[head++]);
   for (int n = 0; n < previous_count; n++)
     unref_fn(previous[n].element);
-  printf("],\"truncated\":%s}", truncated ? "true" : "false");
+  printf("],\"truncated\":%s", truncated ? "true" : "false");
+  Rectangle box;
+  if (!display && portal_input_ready() && window_active(index) &&
+      window_bounds(index, &box)) {
+    frame_window = index;
+    frame_bounds = box;
+    frame_time = time(NULL);
+    visual_frame = 0;
+    snprintf(frame_id, sizeof(frame_id), "f%lu", ++sequence);
+    printf(",\"inputFrameId\":");
+    quoted(frame_id, 40);
+  }
+  printf("}");
   return NULL;
 }
 static void release_input(void) {
+  while (portal_key_count > 0)
+    portal_key(portal_keys[--portal_key_count], 0);
+  if (portal_held_button)
+    portal_button(portal_held_button, 0);
+  portal_held_button = 0;
   if (!display)
     return;
   for (int i = 0; i < held_key_count; i++)
@@ -577,34 +683,56 @@ static unsigned char channel(unsigned long value, unsigned long mask) {
   return (unsigned char)((value & mask) * 255 / mask);
 }
 static const char *screenshot(int index) {
+  if (!display && !windows[index].screen)
+    return "unsupported";
   Rectangle box;
-  if (!active(windows[index].handle) || !bounds(windows[index].handle, &box))
+  if (!window_active(index) || !window_bounds(index, &box))
     return "focus";
   if (box.width > 16000 || box.height > 16000)
     return "unsupported";
-  XImage *image =
-      XGetImage(display, windows[index].handle, 0, 0, (unsigned int)box.width,
-                (unsigned int)box.height, AllPlanes, ZPixmap);
-  if (!image)
-    return "failed";
   int width = box.width > 1280 ? 1280 : box.width;
   int height = box.height * width / box.width;
+  if (height < 1)
+    height = 1;
   size_t raw_size = (size_t)(width * 3 + 1) * (size_t)height;
   unsigned char *raw = calloc(1, raw_size);
-  if (!raw) {
-    XDestroyImage(image);
+  if (!raw)
     return "failed";
-  }
-  for (int y = 0; y < height; y++)
-    for (int x = 0; x < width; x++) {
-      unsigned long pixel =
-          XGetPixel(image, x * box.width / width, y * box.height / height);
-      size_t at = (size_t)y * (size_t)(width * 3 + 1) + (size_t)x * 3 + 1;
-      raw[at] = channel(pixel, image->red_mask);
-      raw[at + 1] = channel(pixel, image->green_mask);
-      raw[at + 2] = channel(pixel, image->blue_mask);
+  if (display) {
+    XImage *image = XGetImage(display, windows[index].handle, 0, 0,
+        (unsigned int)box.width, (unsigned int)box.height, AllPlanes, ZPixmap);
+    if (!image) {
+      free(raw);
+      return "failed";
     }
-  XDestroyImage(image);
+    for (int y = 0; y < height; y++)
+      for (int x = 0; x < width; x++) {
+        unsigned long pixel =
+            XGetPixel(image, x * box.width / width, y * box.height / height);
+        size_t at = (size_t)y * (size_t)(width * 3 + 1) + (size_t)x * 3 + 1;
+        raw[at] = channel(pixel, image->red_mask);
+        raw[at + 1] = channel(pixel, image->green_mask);
+        raw[at + 2] = channel(pixel, image->blue_mask);
+      }
+    XDestroyImage(image);
+  } else {
+    unsigned char *rgb = NULL;
+    const char *error = portal_capture(box, &rgb, &width, &height, interrupted);
+    if (error) {
+      free(raw);
+      return error;
+    }
+    for (int y = 0; y < height; y++)
+      memcpy(raw + (size_t)y * (size_t)(width * 3 + 1) + 1,
+             rgb + (size_t)y * (size_t)width * 3, (size_t)width * 3);
+    free(rgb);
+    Rectangle current;
+    if (!window_active(index) || !window_bounds(index, &current) ||
+        !same_bounds(box, current)) {
+      free(raw);
+      return "focus";
+    }
+  }
   uLongf compressed_size = compressBound(raw_size);
   unsigned char *compressed = malloc(compressed_size);
   if (!compressed) {
@@ -635,6 +763,7 @@ static const char *screenshot(int index) {
   chunk(png + 45 + compressed_size, "IEND", NULL, 0);
   free(compressed);
   frame_window = index;
+  visual_frame = 1;
   frame_bounds = box;
   frame_time = time(NULL);
   snprintf(frame_id, sizeof(frame_id), "f%lu", ++sequence);
@@ -649,29 +778,174 @@ static const char *screenshot(int index) {
   free(png);
   return NULL;
 }
-static const char *input(Json request, int index) {
-  char frame[200], operation[200];
-  text(member(request, "frameId"), frame, sizeof(frame));
-  text(member(request, "operation"), operation, sizeof(operation));
-  Rectangle box;
-  if (frame_window != index || strcmp(frame, frame_id) ||
-      time(NULL) - frame_time > 15 || !bounds(windows[index].handle, &box) ||
-      !same_bounds(box, frame_bounds))
-    return "stale";
-  if (display) {
-    if (!active(windows[index].handle))
+static const char *input_guard(int index, Rectangle box) {
+  portal_poll();
+  if (interrupted())
+    return "cancelled";
+  if (!portal_input_ready())
+    return "portal_required";
+  if (windows[index].screen && frame_foreground) {
+    if (pid_fn(frame_foreground, NULL) != frame_foreground_pid)
       return "focus";
-  } else {
-    void *state = state_fn(windows[index].accessible);
+    clear_cache_fn(frame_foreground);
+    void *state = state_fn(frame_foreground);
     int focused = state && contains_fn(state, 1);
     if (state)
       unref_fn(state);
     if (!focused)
       return "focus";
   }
+  Rectangle current;
+  if (!window_active(index) || !window_bounds(index, &current) ||
+      !same_bounds(current, box))
+    return "focus";
+  return NULL;
+}
+static const char *portal_input(Json request, int index, Rectangle box,
+                                 const char *operation, int duration) {
+  if (!portal_input_ready())
+    return "portal_required";
+  if (windows[index].screen && !portal_contains(box))
+    return "unsupported";
+  int camera_x = number(request, "dx", 0), camera_y = number(request, "dy", 0);
+  if (labs((long)camera_x) > 2000 || labs((long)camera_y) > 2000)
+    return "unsupported";
+  if ((!visual_frame || !windows[index].screen) &&
+      (strcmp(operation, "keys") && strcmp(operation, "text")))
+    return "visual_frame_required";
+  if (!visual_frame && (camera_x || camera_y))
+    return "visual_frame_required";
+  const char *error = input_guard(index, box);
+  if (error)
+    return error;
+  if (!strcmp(operation, "move") || !strcmp(operation, "click")) {
+    int x = number(request, "x", -1), y = number(request, "y", -1);
+    if (x < 0 || y < 0 || x >= box.width || y >= box.height)
+      return "unsupported";
+    char button[20];
+    text(member(request, "button"), button, sizeof(button));
+    int code = !button[0] || !strcmp(button, "left") ? 272 :
+        !strcmp(button, "right") ? 273 : !strcmp(button, "middle") ? 274 : 0;
+    if (!strcmp(operation, "click") && !code)
+      return "unsupported";
+    error = portal_motion(box.x + x, box.y + y, 0);
+    if (!error && !strcmp(operation, "click")) {
+      error = input_guard(index, box);
+      if (!error) {
+        portal_held_button = code;
+        error = portal_button(code, 1);
+      }
+    }
+  } else if (!strcmp(operation, "relative_move")) {
+    error = portal_motion(camera_x, camera_y, 1);
+  } else if (!strcmp(operation, "scroll")) {
+    if (!camera_x && !camera_y)
+      return "unsupported";
+    error = portal_motion(box.x + box.width / 2, box.y + box.height / 2, 0);
+    for (int i = 0; i < 12 && !error; i++) {
+      error = input_guard(index, box);
+      if (!error)
+        error = portal_scroll(camera_x / 12.0, camera_y / 12.0, i == 11);
+      g_usleep(10000);
+    }
+  } else if (!strcmp(operation, "keys")) {
+    Json keys = member(request, "keys");
+    const char *p = skip_space(keys.start);
+    if (*p++ != '[')
+      return "unsupported";
+    uint32_t symbols[6];
+    int count = 0;
+    while (*(p = skip_space(p)) != ']' && count < 6) {
+      const char *end = skip_value(p, 0);
+      if (!end)
+        return "unsupported";
+      char key[30];
+      text((Json){p, end}, key, sizeof(key));
+      for (int i = 0; key[i]; i++)
+        key[i] = (char)toupper((unsigned char)key[i]);
+      KeySym symbol = key_symbol(key);
+      if (!symbol)
+        return "unsupported";
+      for (int i = 0; i < count; i++)
+        if (symbols[i] == symbol)
+          return "unsupported";
+      symbols[count++] = (uint32_t)symbol;
+      p = skip_space(end);
+      if (*p == ',')
+        p++;
+      else if (*p != ']')
+        return "unsupported";
+    }
+    if (*p != ']' || !count)
+      return "unsupported";
+    for (int i = 0; i < count && !error; i++) {
+      portal_keys[portal_key_count++] = symbols[i];
+      error = portal_key(symbols[i], 1);
+    }
+  } else if (!strcmp(operation, "text")) {
+    char value[32001];
+    text(member(request, "value"), value, sizeof(value));
+    if (!g_utf8_validate(value, -1, NULL))
+      return "unsupported";
+    double deadline = monotonic_time() + 5;
+    for (char *p = value; *p && !error; p = g_utf8_next_char(p)) {
+      error = input_guard(index, box);
+      if (!error && monotonic_time() > deadline)
+        error = "cancelled";
+      if (!error) {
+        gunichar character = g_utf8_get_char(p);
+        uint32_t symbol = character == '\n' ? XK_Return :
+            character == '\t' ? XK_Tab : character <= 255 ? character :
+            0x01000000 | character;
+        portal_keys[portal_key_count++] = symbol;
+        error = portal_key(symbol, 1);
+        const char *released = portal_key(symbol, 0);
+        portal_key_count = 0;
+        if (!error)
+          error = released;
+      }
+    }
+  } else
+    return "unsupported";
+  int moved_x = 0, moved_y = 0;
+  double deadline = monotonic_time() + duration / 1000.0;
+  while (!error && monotonic_time() < deadline) {
+    error = input_guard(index, box);
+    if (!error && !strcmp(operation, "keys") && (camera_x || camera_y)) {
+      double fraction = 1 - (deadline - monotonic_time()) * 1000 / duration;
+      int x = (int)(camera_x * fraction), y = (int)(camera_y * fraction);
+      error = portal_motion(x - moved_x, y - moved_y, 1);
+      moved_x = x;
+      moved_y = y;
+    }
+    g_usleep(10000);
+  }
+  release_input();
+  clear_nodes();
+  frame_window = -1;
+  if (error)
+    return error;
+  printf("{\"performed\":");
+  quoted(operation, 40);
+  printf(",\"released\":true,\"verified\":false}");
+  return NULL;
+}
+static const char *input(Json request, int index) {
+  char frame[200], operation[200];
+  text(member(request, "frameId"), frame, sizeof(frame));
+  text(member(request, "operation"), operation, sizeof(operation));
+  Rectangle box;
+  if (frame_window != index || strcmp(frame, frame_id) ||
+      time(NULL) - frame_time > 15 || !window_bounds(index, &box) ||
+      !same_bounds(box, frame_bounds))
+    return "stale";
+  if (!window_active(index))
+    return "focus";
   int duration = number(request, "durationMs", 0);
   if (duration < 0 || duration > 5000)
     return "unsupported";
+  if (!display)
+    return portal_input(request, index, box, operation, duration);
   cancelled = 0;
   const char *error = NULL;
   if (!strcmp(operation, "move") || !strcmp(operation, "click")) {
@@ -791,30 +1065,49 @@ static const char *input(Json request, int index) {
   return NULL;
 }
 static const char *execute(Json request) {
+  portal_poll();
   char action[200];
   text(member(request, "action"), action, sizeof(action));
   if (number(request, "version", 0) != 1)
     return "unsupported";
   if (!strcmp(action, "status")) {
     printf("{\"appVersion\":\"%s\",\"platform\":\"linux\",\"accessibility\":%s,\"input\":%s,"
-           "\"screenshots\":%s,\"audio\":false,\"session\":\"%s\"}",
-           ARARA_APP_VERSION, desktop_fn ? "true" : "false", display ? "true" : "false",
-           display ? "true" : "false",
-           getenv("WAYLAND_DISPLAY") ? "wayland" : "x11");
+           "\"screenshots\":%s,\"audio\":false,\"session\":\"%s\","
+           "\"portalAvailable\":%s,\"portalRequired\":%s,\"permissionPending\":%s}",
+           ARARA_APP_VERSION, desktop_fn ? "true" : "false",
+           display || portal_input_ready() ? "true" : "false",
+           display || portal_capture_ready() ? "true" : "false",
+           getenv("WAYLAND_DISPLAY") ? "wayland" : "x11",
+           portal_available() ? "true" : "false",
+           !display && portal_available() && !portal_input_ready() ? "true" : "false",
+           portal_pending() ? "true" : "false");
+    return NULL;
+  }
+  if (!strcmp(action, "setup")) {
+    if (display || !getenv("WAYLAND_DISPLAY"))
+      return "unsupported";
+    cancelled = 0;
+    const char *error = portal_setup(interrupted);
+    if (error && !strcmp(error, "portal_pending")) {
+      printf("{\"configured\":false,\"permissionPending\":true}");
+      return NULL;
+    }
+    if (error)
+      return error;
+    frame_window = -1;
+    clear_nodes();
+    printf("{\"configured\":true}");
     return NULL;
   }
   if (!strcmp(action, "stop")) {
     release_input();
+    portal_close();
     frame_window = -1;
     printf("{\"stopped\":true}");
     return NULL;
   }
   if (!display && !strcmp(action, "list_windows"))
     return accessible_windows(request);
-  if (!display &&
-      (!strcmp(action, "input") || !strcmp(action, "take_screenshot") ||
-       !strcmp(action, "launch_app")))
-    return "session_unavailable";
   if (!strcmp(action, "launch_app")) {
     char application[200];
     text(member(request, "application"), application, sizeof(application));
@@ -824,12 +1117,22 @@ static const char *execute(Json request) {
       if (!isalnum((unsigned char)application[i]) && application[i] != '.' &&
           application[i] != '_' && application[i] != '-')
         return "unsupported";
-    pid_t child = fork();
-    if (child == 0) {
-      execlp("gtk-launch", "gtk-launch", application, (char *)NULL);
-      _exit(127);
-    }
-    if (child < 0)
+    char identifier[220];
+    snprintf(identifier, sizeof(identifier), "%s%s", application,
+        g_str_has_suffix(application, ".desktop") ? "" : ".desktop");
+    GDesktopAppInfo *app = g_desktop_app_info_new(identifier);
+    if (!app)
+      return "unsupported";
+    GError *error = NULL;
+    int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    int launched = null_fd >= 0 && g_desktop_app_info_launch_uris_as_manager_with_fds(
+        app, NULL, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL,
+        null_fd, null_fd, null_fd, &error);
+    if (null_fd >= 0)
+      close(null_fd);
+    g_clear_error(&error);
+    g_object_unref(app);
+    if (!launched)
       return "failed";
     printf("{\"requested\":true}");
     return NULL;
@@ -839,6 +1142,33 @@ static const char *execute(Json request) {
   int index = select_window(request);
   if (index < 0)
     return "stale";
+  if (windows[index].screen) {
+    if (!strcmp(action, "window_info")) {
+      printf("{\"application\":\"Desktop\",\"surface\":\"screen\"}");
+      return NULL;
+    }
+    if (!strcmp(action, "focus_window")) {
+      printf("{\"focused\":true}");
+      return NULL;
+    }
+    if (!strcmp(action, "take_snapshot") || !strcmp(action, "take_screenshot")) {
+      if (frame_foreground)
+        unref_fn(frame_foreground);
+      frame_foreground = NULL;
+      for (int i = 0; i < window_count && !frame_foreground; i++)
+        if (windows[i].accessible && window_active(i)) {
+          frame_foreground = ref_fn(windows[i].accessible);
+          frame_foreground_pid = (unsigned int)windows[i].pid;
+        }
+    }
+    if (!strcmp(action, "take_snapshot"))
+      return snapshot(index);
+    if (!strcmp(action, "take_screenshot"))
+      return screenshot(index);
+    if (!strcmp(action, "input"))
+      return input(request, index);
+    return "unsupported";
+  }
   if (display && !safe_window(windows[index].handle))
     return "secure";
   if (!display && !strcmp(action, "window_info")) {
@@ -950,17 +1280,8 @@ static const char *execute(Json request) {
   }
   if (strcmp(action, "act"))
     return "unsupported";
-  if (display) {
-    if (!active(windows[index].handle))
-      return "focus";
-  } else {
-    void *state = state_fn(windows[index].accessible);
-    int focused = state && contains_fn(state, 1);
-    if (state)
-      unref_fn(state);
-    if (!focused)
-      return "focus";
-  }
+  if (!window_active(index))
+    return "focus";
   char operation[200];
   text(member(request, "operation"), operation, sizeof(operation));
   int success = 0;
@@ -1034,20 +1355,47 @@ static int xerror(Display *connection, XErrorEvent *event) {
   (void)event;
   return 0;
 }
-int main(void) {
+int main(int argc, char **argv) {
+  int permissions = argc == 2 && !strcmp(argv[1], "--permissions");
+  if (getenv("WAYLAND_DISPLAY"))
+    platform_scope(permissions);
   signal(SIGTERM, terminate);
   signal(SIGINT, terminate);
   XSetErrorHandler(xerror);
   if (!getenv("WAYLAND_DISPLAY"))
     display = XOpenDisplay(NULL);
   load_atspi();
+  portal_init();
+  if (permissions) {
+    const char *error = portal_setup(interrupted);
+    while (portal_pending() && !cancelled) {
+      portal_poll();
+      g_usleep(10000);
+    }
+    int ready = portal_input_ready() && portal_capture_ready();
+    portal_close();
+    return ready && (!error || !strcmp(error, "portal_pending")) ? 0 : 1;
+  }
   pthread_t input_thread;
   pthread_create(&input_thread, NULL, reader, NULL);
   for (;;) {
     char line[64001];
     pthread_mutex_lock(&state_lock);
-    while (!queued && !closed_input)
-      pthread_cond_wait(&available, &state_lock);
+    while (!queued && !closed_input) {
+      struct timespec deadline;
+      clock_gettime(CLOCK_REALTIME, &deadline);
+      deadline.tv_nsec += 10000000;
+      if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000;
+      }
+      pthread_cond_timedwait(&available, &state_lock, &deadline);
+      if (!queued && !closed_input) {
+        pthread_mutex_unlock(&state_lock);
+        portal_poll();
+        pthread_mutex_lock(&state_lock);
+      }
+    }
     if (!queued && closed_input) {
       pthread_mutex_unlock(&state_lock);
       break;
@@ -1085,6 +1433,7 @@ int main(void) {
     fflush(stdout);
   }
   release_input();
+  portal_close();
   clear_nodes();
   clear_windows();
   if (display)

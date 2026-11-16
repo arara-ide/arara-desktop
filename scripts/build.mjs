@@ -33,7 +33,12 @@ if (process.platform === 'darwin') {
 } else if (process.platform === 'win32') {
   run('dotnet', ['publish', 'native/windows/AraraDesktop.csproj', '-c', 'Release', '-r', `win-${process.arch}`, '--self-contained', 'true', `-p:Version=${version}`, `-p:FileVersion=${fileVersion}`, '-p:PublishSingleFile=true', '-p:IncludeNativeLibrariesForSelfExtract=true', '-o', output]);
 } else if (process.platform === 'linux') {
-  run('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', `-DARARA_APP_VERSION=${JSON.stringify(version)}`, 'native/linux/main.c', '-lX11', '-lXtst', '-ldl', '-lz', '-pthread', '-o', join(output, 'arara-desktop')]);
+  const messages = ['en', 'pt', 'es'].map(language => JSON.parse(readFileSync(join(root, `src/locales/${language}.json`), 'utf8'))['setup.linux']);
+  writeFileSync(join(output, 'linux-locales.h'), `static const char *arara_linux_setup_messages[] = {${messages.map(value => JSON.stringify(value)).join(',')}};\n`);
+  const flags = spawnSync('pkg-config', ['--cflags', 'gio-unix-2.0', 'libei-1.0'], { encoding: 'utf8' });
+  const libraries = spawnSync('pkg-config', ['--libs', 'gio-unix-2.0'], { encoding: 'utf8' });
+  if (flags.status !== 0 || libraries.status !== 0) throw new Error('Linux build requires GIO and libei development headers');
+  run('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', `-DARARA_APP_VERSION=${JSON.stringify(version)}`, '-Idist', ...flags.stdout.trim().split(/\s+/), 'native/linux/main.c', 'native/linux/portal.c', 'native/linux/eis.c', 'native/linux/platform.c', ...libraries.stdout.trim().split(/\s+/), '-lX11', '-lXtst', '-ldl', '-lz', '-pthread', '-o', join(output, 'arara-desktop')]);
 } else throw new Error('Unsupported platform');
 if (process.platform === 'linux') cpSync(join(root, 'assets/arara-desktop.png'), join(output, 'arara-desktop.png'));
 if (process.platform !== 'darwin') writeFileSync(join(output, 'version.json'), metadata);
